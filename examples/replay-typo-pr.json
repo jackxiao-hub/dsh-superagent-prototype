@@ -1,0 +1,18 @@
+{
+  "version": 1,
+  "name": "offline-typo-pr-example",
+  "mode": "observe",
+  "allowed": ["alice"],
+  "bots": ["ci-bot"],
+  "steps": [
+    { "op": "receive", "id": "request", "thread": "issue-1", "actor": "alice", "addressed": "mention", "text": "Correct the specific existing heading typo." },
+    { "op": "receive", "id": "followup", "thread": "issue-1", "actor": "alice", "text": "Keep the existing capitalization." },
+    { "op": "repeat", "trigger": "request" },
+    { "op": "check", "id": "accepted-once-and-followup-routed", "expected": { "tickets": 1, "workersStarted": 1, "assessmentRequests": 1, "duplicates": 1, "ticket": { "origin": "request", "strength": "explicit", "basis": "addressed", "assignments": 1, "inputs": 1, "includesTrigger": "followup" } } },
+    { "op": "report", "ticket": "request", "state": "ready", "summary": "Synthetic patch result. No actual tests or GitHub operations ran.", "pull": 17 },
+    { "op": "check", "id": "synthetic-pr-delivered", "expected": { "sent": 2, "ticket": { "origin": "request", "report": "ready", "outcome": "open" } } },
+    { "op": "closePull", "pull": 17, "outcome": "merged" },
+    { "op": "restart" },
+    { "op": "check", "id": "merged-state-survives-restart", "expected": { "tickets": 1, "workersStarted": 1, "sent": 2, "pendingEffects": 0, "restarts": 1, "ticket": { "origin": "request", "outcome": "merged" } } }
+  ]
+}

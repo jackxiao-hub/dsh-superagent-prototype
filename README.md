@@ -38,6 +38,16 @@ Read the numbered documents in order; each builds only on the ones before it.
 
 `pnpm check` runs the typecheck, the tests and the build.
 
+To verify the domain loop without accounts, a model or network access:
+
+```sh
+pnpm build
+pnpm replay
+pnpm replay --fixture examples/replay-typo-pr.json
+```
+
+The [offline replay guide](docs/009-replay.md) distinguishes real Engine/SQLite/Outbox behavior from scripted Assessment, Executor, Channel and PR adapters. A successful replay does not certify real coding quality or external delivery.
+
 ## License
 
 [MIT](LICENSE)

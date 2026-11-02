@@ -20,7 +20,7 @@ const files = (directory: string): string[] => readdirSync(join(ROOT, directory)
  * Bare filenames inherit the directory of the preceding path in the same cell.
  */
 function listed(heading: string): string[] {
-  const lines = read('docs/007-architecture.md').split('\n')
+  const lines = read('docs/007-architecture.md').split(/\r?\n/)
   const start = lines.indexOf(`## ${heading}`)
   const end = lines.findIndex((line, index) => index > start && line.startsWith('## '))
   // The first two rows are the header and its separator.

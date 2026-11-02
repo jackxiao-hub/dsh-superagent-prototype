@@ -6,8 +6,8 @@
 
 | 阶段 | 状态 | 范围 | 放行条件 |
 | --- | --- | --- | --- |
-| P0 | 完成兼容代码与本机验证，等待远端 CI | DSH 0.2.1-rc.5、Cordis 4.0.5、Schemastery 3.18.5；锁文件；Linux/Windows CI | 无 peer 冲突，类型检查和构建通过；平台专用测试明确区分 |
-| P1 | 开发中 | 无账号、模型和网络的确定性离线回放；真实 Engine / Policy / SQLite / Effects / Outbox | 请求到模拟 PR/交付、订阅直通、去重、观察模式、停止与恢复全部有断言 |
+| P0 | 完成兼容代码；Linux 双版本 CI 通过，Windows 跨盘 fixture 在 P1 修复 | DSH 0.2.1-rc.5、Cordis 4.0.5、Schemastery 3.18.5；锁文件；Linux/Windows CI | 无 peer 冲突，类型检查和构建通过；平台专用测试明确区分 |
+| P1 | 完成离线领域闭环与本机验证 | 无账号、模型和网络的确定性离线回放；真实 Engine / Policy / SQLite / Effects / Outbox | 请求到模拟 PR/交付、订阅直通、去重、观察模式、停止与恢复全部有断言 |
 | P2 | 待集成 | 安全默认、独立 Router 工作目录、持久急停、调度预算、主动接单配额 | Host 端强制；跨重启不清零；急停先持久化再取消；人工恢复有 CAS |
 | P3 | 待实现 | 主动观察统计、只读运维检查与部署验收说明 | 不自动扩大授权、不擅自恢复人工停止、故障原因可追溯 |
 
@@ -37,6 +37,14 @@ pnpm check
 默认不运行依赖 lifecycle scripts。本项目所用 SQLite 为 Node 内置模块，不需另外编译 SQLite addon。
 
 CI 在 Linux 的 Node 22.20.0 / 24.13.0 执行完整检查，在 Windows / Node 24.13.0 执行可移植检查。Windows 条件跳过的只有明确需要 POSIX 执行环境的用例：服务控制脚本、扩展名为空的 shell shim / Feishu consumer、真实 CLI setup 与 POSIX 权限位；POSIX kill 信号断言亦不适用 Windows。核心领域、授权、SQLite、投递、UI 与大部分 Runtime 测试仍然运行。
+
+## P1：离线领域闭环
+
+`pnpm build` 后执行 `pnpm replay`，默认运行 33 步、14 个检查，覆盖明确请求、Mandate、订阅直通、事件去重、观察模式、人工停止和 4 次 SQLite 关闭重开。专项测试 11 项，输出包含真实/模拟实现边界；失败返回非零退出码。自定义数据场景有 strict schema、大小和执行步数上限，不接受脚本或已有状态目录。
+
+P1 集成本机 `pnpm check`：**1179 通过、29 个明确 POSIX 用例跳过**，类型检查和构建通过；构建后的默认场景与 JSON 示例均 exit 0。P0 远端 Linux 双版本完整 CI 已通过；Windows runner 的 TEMP 与 checkout 不同盘，暴露了 prompt 测试 fixture 使用跨盘 `relative()` 的问题，P1 将 fixture 限定到 package 同盘，未放宽生产路径规则。
+
+这里的 P1 是可重复的领域闭环验收，不是已部署的真实 GitHub Agent；后者仍需专用账号和隔离环境中的集成验收。
 
 ## 支持边界
 

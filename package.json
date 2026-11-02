@@ -48,6 +48,8 @@
     "build": "tsdown",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "replay": "node lib/replay.js",
+    "test:replay": "vitest run tests/replay.spec.ts",
     "check": "pnpm typecheck && pnpm test && pnpm build"
   },
   "engines": {
