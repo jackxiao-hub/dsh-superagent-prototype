@@ -4,7 +4,7 @@ import { backfillChat, consumerRetry, feishuKind, feishuTriggerId, feishuRef, fe
   from '../src/sources/feishu.ts'
 import { KV } from '../src/kv.ts'
 import { apply as applyFeishu, pollThreads as pollFeishuThreads } from '../src/sources/feishu.ts'
-import { runFeishu } from '../src/sources/feishu-loops.ts'
+import { consumerHealth, runFeishu } from '../src/sources/feishu-loops.ts'
 import { commentTrigger, githubAddress, githubChannel, issueTrigger, type GithubComment, type GithubIssue } from '../src/sources/github-trigger.ts'
 import { claimPull, observePull, pullEndNotices, pullOf, ticketBranch, type Pull } from '../src/sources/github-pull.ts'
 import { ciCounts, ciFact, ciSummary } from '../src/sources/github-read.ts'
@@ -22,6 +22,17 @@ import { SetupError, type SetupProblem } from '../src/setup.ts'
 import { existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+
+it('does not let a late stderr ready line erase an event error from stdout on the same connection', () => {
+  for (const order of [['ready', 'error'], ['error', 'ready']] as const) {
+    const report = vi.fn(), status = consumerHealth(report)
+    for (const event of order) event === 'ready' ? status.ready() : status.error('Invalid JSON event')
+    expect(report.mock.lastCall?.[0]).toEqual({ state: 'error', detail: 'Invalid JSON event' })
+    // A successful new connection may recover; an out-of-order line on the old connection may not.
+    consumerHealth(report).ready()
+    expect(report.mock.lastCall?.[0]).toMatchObject({ state: 'ready' })
+  }
+})
 
 const MEMBER = 'ou_alice'
 function host(overrides: Partial<SourceContextDeps> = {}) {
