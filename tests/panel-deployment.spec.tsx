@@ -105,7 +105,7 @@ it('tells a dsh-superagent that is starting from a browser that cannot write on 
   expect(limit().disabled).toBe(true)
   await act(async () => { publish({ status: 'ready' }) })
   expect(limit().disabled).toBe(false)
-  await act(async () => { publish({ mode: 'memory', status: 'unavailable', writable: false }) })
+  await act(async () => { publish({ status: 'unavailable', writable: false }) })
   expect(text()).toContain(zh.deploymentReadOnly)
 })
 

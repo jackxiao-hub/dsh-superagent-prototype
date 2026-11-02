@@ -6,7 +6,10 @@ import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { afterEach, beforeEach, expect, it } from 'vitest'
+import { afterEach, beforeEach, expect, it as test } from 'vitest'
+
+// The production supervisor and these fixtures require POSIX fcntl, ps and shell semantics.
+const it = test.skipIf(process.platform === 'win32')
 
 let root: string
 let server: Server | undefined

@@ -49,6 +49,12 @@ describe('configuration schema', () => {
       .toEqual({ stateDir: join(dir, 'state'), promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 })
     expect(() => Config(minimal({ stateDir: 'relative/dir' }))).toThrow()
     expect(() => Config(minimal({ stateDir: '~/dir' }))).toThrow()
+    expect(() => Config(minimal({ stateDir: 'C:relative' }))).toThrow()
+    expect(() => Config(minimal({ stateDir: '\\\\server' }))).toThrow()
+    if (process.platform === 'win32') {
+      expect(machineOf(Config(minimal({ stateDir: 'C:/agent state' }))).stateDir).toBe('C:/agent state')
+      expect(machineOf(Config(minimal({ stateDir: '\\\\server\\share\\agent' }))).stateDir).toBe('\\\\server\\share\\agent')
+    }
   })
   it('names keys the configuration does not define, and where the values of older keys live now', () => {
     const raw = minimal({ repository: 'acme/widgets', repositoryPath: '/srv/widgets', blockedCommands: [], author: { name: 'Alice' }, extra: 1 })
@@ -56,7 +62,8 @@ describe('configuration schema', () => {
   })
 })
 
-describe('setup', () => {
+// Setup fixtures are executable POSIX shell scripts; Windows portable checks cover the configuration schema above.
+describe.skipIf(process.platform === 'win32')('setup', () => {
   it('reads the repository from the GitHub Source and the accounts from their CLIs, skipping the worker shims', async () => {
     const deployment = await resolveDeployment(machine(), { repository: 'acme/widgets', cli: 'gh' }, probe, path)
     expect(deployment).toMatchObject({ repository: 'acme/widgets', github: { cli: join(dir, 'bin', 'gh'), login: 'Agent-Bot', noreply: '7+Agent-Bot@users.noreply.github.com' } })

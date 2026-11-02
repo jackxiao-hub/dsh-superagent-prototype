@@ -457,8 +457,7 @@ type Ops = Parameters<ConfigForm<Record<string, unknown>>['mutate']>[0]
 export function fakeForm(writable = true, accept = true) {
   const listeners = new Set<() => void>()
   let snapshot: ConfigFormSnapshot<Record<string, unknown>> = { status: 'ready', value: { ...MACHINE }, base: undefined, user: undefined,
-    revision: 1, writable,
-    mode: 'host' }
+    revision: 1, writable }
   const notify = () => { for (const listener of listeners) listener() }
   const mutations: { ops: Ops; revision: number | undefined }[] = []
   const form: ConfigForm<Record<string, unknown>> = {
