@@ -74,6 +74,16 @@ P3 集成本机验证：frozen lockfile 安装（禁 lifecycle scripts）、peer
 
 P3 完成的是统计、诊断工具与可执行验收标准，不是已运行数周的主动 Agent、不证明语义准确率，也不是跨设备 daemon 或自主修改自身代码的 Watchdog。
 
+## 快速重启后的状态锁
+
+2026-11-04 的已安装体验版在用户重启后出现 backend 404。只读读取失败 Fiber 的原始异常确认 `ELOCKED: Lock file is already being held`；不是账号配置问题。原实现一旦遇到上个进程未过期的 heartbeat lock 就直接失败，过期后也不会自行重试。
+
+入口现在先进行可中止、最长约 40 秒的锁可用性等待，再构造 Runtime。检查沿用实际锁库的 30 秒 stale 规则，不删锁、不打开数据库、不降低 stale 阈值。真正的 `lockSync` 仍是唯一写者的最终原子裁决；持续持锁的活实例不能被绕过。取消启动时不会事后创建 Runtime，也不会改变 pause / safety halt。
+
+源码见 [startup wait](../src/app/startup-lock.ts)、[plugin entry](../src/index.ts)，回归见 [real lock tests](../tests/startup-lock.spec.ts) 与 [entry lifecycle tests](../tests/index.spec.ts)。强制结束后重新启动，管理页面在等待的几十秒内仍可能显示尚未响应；若另一个实例持续持锁，超时将保守拒绝启动，应调查重复实例，不应删除锁或数据库。
+
+本机完整 `pnpm check` 通过：**1244 项通过、29 个 POSIX 用例跳过**，peer、类型检查与构建通过；新增 13 项真实锁测试和 2 项入口生命周期测试。实际已安装旧体验版仅通过插件级重试恢复接口并保留 paused / 无账号状态；新补丁不声称已经执行过用户的真实 DSH 冷重启验收。
+
 ## 支持边界
 
 **Windows 的类型检查、构建和领域测试通过，不代表 Windows 生产部署已支持。** 服务脚本仍依赖 `fcntl` / `tmux`，prepare 与 CLI shim 仍依赖 POSIX shell。首选独立 Linux 环境；WSL2 仅作为可选开发环境，需限制 Windows 盘挂载和互操作。

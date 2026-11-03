@@ -258,6 +258,7 @@ Setup problems appear on the overview with a link to the fix, in the panel's lan
 
 | Symptom | Cause and fix |
 | --- | --- |
+| Backend 404 after a fast restart; startup reports `ELOCKED` | A force-stopped process may leave a fresh state-directory heartbeat lock. Startup now waits up to about 40 seconds using the same 30-second stale rule before constructing Runtime. Let the library expire the orphan; do not delete the lock or database. If a live instance keeps renewing it, the new instance times out conservatively: investigate duplicate processes sharing this stateDir |
 | `The agent GitHub CLI is not set.` | Set the agent's CLI on the GitHub card |
 | `The agent GitHub CLI was not found.` | Set the wrapper's absolute path, or a command name on `PATH` |
 | `The agent GitHub CLI cannot read its account` | Sign the wrapper in with `auth login` |

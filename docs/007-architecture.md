@@ -319,6 +319,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/diagnostics/index.ts` | Read-only SQLite integrity/schema checks and redacted aggregate-only halt, queue and observation statistics; no Runtime or auto-healing |
 | `src/diagnostics/cli.ts` | Explicit state-directory input, bounded diagnostic report and healthy/held/failure exit contract |
 | `src/app/runtime.ts` | The Runtime, the composition root, with its start and stop |
+| `src/app/startup-lock.ts` | Abortable, bounded, read-only heartbeat-lock readiness wait before constructing Runtime; final atomic acquisition remains in Runtime |
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
 | `src/app/passes.ts` | Passes, the pass scheduler |
 | `src/app/outbox.ts` | The Outbox: the Engine's `Outbox` port, the receipts and the `reply` effects that send them |
@@ -434,6 +435,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `tests/runtime.spec.ts` | The whole application on a simulated DeepSeek Harness host, through tools and HTTP |
 | `tests/safety.spec.ts` | SQLite-persistent halt/CAS, limits, idempotent position accounting, quotas and transaction rollback |
 | `tests/runtime-safety.spec.ts` | Host enforcement, pre-step admission, restart hold, prepare cancellation, external descendants and timed-out cleanup fencing |
+| `tests/startup-lock.spec.ts` | Real heartbeat locks: fresh/crashed-owner waiting, stale recovery, live-owner protection, bounded timeout and abort without unlocking |
 | `tests/tools.spec.ts` | The Sessions' tools: what `orchestrator_read` reads for each role, and the shapes and checks of the other main Session tools |
 | `tests/runtime-concurrency.spec.ts` | Work that overlaps: Triggers during a pass, Tickets that change during deliveries and launches |
 | `tests/http.spec.ts` | The same-origin and loopback checks, the status of each kind of failure, the body limit, path parameters and queries |

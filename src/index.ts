@@ -2,6 +2,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import type {} from '@deepseek-ai/dsh-settings'
 import { Runtime } from './app/runtime.ts'
+import { waitForStateLock } from './app/startup-lock.ts'
 import { Config, machineOf, type DeploymentConfig } from './deployment.ts'
 
 export const name = 'dsh-superagent'
@@ -9,6 +10,13 @@ export const inject = ['agents', 'sessionController', 'sessionPersistence', 'wor
 export { Config }
 export async function apply(ctx: Context, config: DeploymentConfig): Promise<void> {
   const machine = machineOf(config)
+  // A force-stopped process can leave a fresh heartbeat lock. Wait without constructing a partial Runtime service;
+  // Runtime still performs the atomic lockSync acquisition, so another live owner can never be bypassed.
+  const startup = new AbortController()
+  ctx.effect(() => () => { startup.abort(new Error('Superagent startup cancelled')) })
+  await waitForStateLock(machine.stateDir, { signal: startup.signal,
+    onWait: () => { ctx.logger.info('Waiting for the state-directory lock to be released or expire; no work has started') } })
+  startup.signal.throwIfAborted()
   // The management panel provides its own settings UI, so disable DSH's auto-generated settings page.
   ctx.inject(['settings'], child => { child.effect(() => child.settings.configure({ auto: false }, ctx.fiber)) })
   // Volatile limits update in place without a restart; account changes restart dsh-superagent. DSH's settings service stops
