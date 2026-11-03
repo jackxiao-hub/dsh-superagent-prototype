@@ -5,6 +5,9 @@ import { describe, expect, it, vi } from 'vitest'
 import { DEFAULT_SCENARIO, ReplayScenarioSchema, runReplay, SUMMARY_LIMITS } from '../src/replay/index.ts'
 import { MAX_FIXTURE_BYTES, runReplayCli } from '../src/replay/cli.ts'
 
+// These two full scenarios perform real FULL-synchronous SQLite writes and repeated reopen cycles.
+// Keep a bounded integration-test deadline without assuming a shared Windows runner finishes disk IO in 5 seconds.
+const SQLITE_REPLAY_TIMEOUT = 30_000
 const request = { op: 'receive', id: 'request', thread: 'issue-1', actor: 'alice', addressed: 'mention', text: 'Scripted existing typo correction.' }
 const fixture = (steps: unknown[]) => ({ version: 1, name: 'test-fixture', steps })
 async function cli(args: string[]) {
@@ -49,11 +52,11 @@ describe('offline deterministic replay using the production domain and SQLite qu
       expect(new Set(summary.messages.map(message => message.id)).size).toBe(summary.messages.length)
       expect(network).not.toHaveBeenCalled()
     } finally { network.mockRestore() }
-  })
+  }, SQLITE_REPLAY_TIMEOUT)
 
   it('returns byte-for-byte deterministic summaries across fresh databases', async () => {
     expect(JSON.stringify(await runReplay())).toBe(JSON.stringify(await runReplay()))
-  })
+  }, SQLITE_REPLAY_TIMEOUT)
 
   it('runs the checked-in data-only example through the same production harness', async () => {
     const example = JSON.parse(readFileSync(new URL('../examples/replay-typo-pr.json', import.meta.url), 'utf8')) as unknown
