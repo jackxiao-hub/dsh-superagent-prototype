@@ -6,6 +6,7 @@ import { SettingsConflict } from '../src/app/settings.ts'
 import type { HttpHost } from '../src/app/http.ts'
 import { SettingsSchema } from '../src/policy.ts'
 import { SetupError } from '../src/setup.ts'
+import { SafetyConflict, SafetyHalted } from '../src/app/safety.ts'
 
 type Handler = (req: unknown, res: unknown) => Promise<void>
 type Headers = Record<string, string | undefined>
@@ -50,6 +51,37 @@ it('answers each kind of failure with its own status', async () => {
   expect(await call('POST', 'tickets/t9/retry')).toEqual({ status: 404, body: { error: 'Ticket not found' } })
   expect(await call('GET', 'nothing/here')).toEqual({ status: 404, body: { error: 'Unknown operation' } })
   expect(await call('POST', 'executor/pause', 'not json')).toEqual({ status: 400, body: { error: 'The request body is not JSON' } })
+})
+
+it('validates operator halt and generation-fenced resume through the same Host operations', async () => {
+  const calls: unknown[] = []
+  const call = serve({
+    safety: { status: () => ({ active: false, generation: 8 }) },
+    emergencyStop: async (reason: string) => { calls.push(['halt', reason]); return { active: true, generation: 7, phase: 'halted', errors: [] } },
+    resumeSafety: async (generation: number) => {
+      calls.push(['resume', generation])
+      if (generation !== 7) throw new SafetyConflict('Halt changed; reload before resuming')
+      return true
+    },
+  })
+  expect(await call('POST', 'safety/halt', { reason: '  Operator stop  ' })).toMatchObject({ status: 200, body: { active: true, generation: 7 } })
+  expect(await call('POST', 'safety/halt', { reason: '' })).toMatchObject({ status: 400 })
+  expect(await call('POST', 'safety/halt', { reason: 'x'.repeat(1001) })).toMatchObject({ status: 400 })
+  expect(await call('POST', 'safety/resume', { generation: 7, origin: 'panel' })).toMatchObject({ status: 400 })
+  expect(await call('POST', 'safety/resume', { generation: -1 })).toMatchObject({ status: 400 })
+  expect(await call('POST', 'safety/resume', { generation: 6 })).toMatchObject({ status: 409 })
+  expect(await call('POST', 'safety/resume', { generation: 7 })).toEqual({ status: 200,
+    body: { resumed: true, safety: { active: false, generation: 8 } } })
+  expect(calls).toEqual([['halt', 'Operator stop'], ['resume', 6], ['resume', 7]])
+})
+
+it('does not retry a Ticket through management while the durable halt is set', async () => {
+  let retried = false
+  const call = serve({ store: { tickets: { get: () => ({ id: 't1' }) } },
+    safety: { assertRunning: () => { throw new SafetyHalted('Operator halt remains set') } },
+    engine: { retryTicket: () => { retried = true } } })
+  expect(await call('POST', 'tickets/t1/retry')).toEqual({ status: 423, body: { error: 'Operator halt remains set' } })
+  expect(retried).toBe(false)
 })
 
 it('decodes path parameters and parses each route\'s query', async () => {

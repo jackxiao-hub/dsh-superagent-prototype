@@ -81,7 +81,8 @@ export const problemOf = (code: SetupCode, values: Record<string, string> = {}) 
 // The kinds' configurations differ, and the fake reads them only as the records the views carry.
 const KINDS = [feishuKind, githubKind] as unknown as SourceKind[]
 export const MACHINE = { stateDir: '/srv/dsh-superagent', promptMaxChars: 100000, admissionContextMaxPages: 10,
-  admissionContextTimeoutMs: 15000 }
+  admissionContextTimeoutMs: 15000, executionPermission: 'workspace-write' as const, allowWorkerSubagents: false,
+  maxWorkerSteps: 120, maxWorkerTurns: 12, inferredAdmissionsPerDay: 0 }
 
 type Settings = ReturnType<typeof SettingsSchema.parse>
 export interface PanelServer {
@@ -100,6 +101,7 @@ export interface PanelServer {
   searching?: (query: string) => Promise<void>
   setup: SetupView
   health: Record<string, Health>
+  safety: StateView['safety']
   /** When true, all API requests return an empty 404 to simulate the host plugin being stopped. */
   down: boolean
   /** Count of responses not yet consumed by the client. */
@@ -159,7 +161,7 @@ function sourceStatuses(): SourceStatusRow[] {
 }
 const stateView = (): StateView => ({
   setup: server.setup, load: { running: server.setup.problem ? 0 : 2, queued: 0, maxWorkers: server.settings.executor.maxWorkers },
-  masterId: 'master', paused: server.settings.paused,
+  masterId: 'master', paused: server.settings.paused, safety: server.safety,
   // The panel does not read health; the service script does.
   health: {},
 })
@@ -247,7 +249,7 @@ function initial(): PanelServer {
     en: 'Feishu message' } }
   const defaults = { revision: 0, previousRevision: null, savedAt: '', source: 'defaults' }
   return {
-    health: {}, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
+    health: {}, safety: { active: false, generation: 0 }, down: false, pending: 0, opened: [], requests: [], misuse: [], queued: new Set(), dropped: [], failing: [],
     setup: { machine: MACHINE, problem: null, feishuProblem: null,
       accounts: { repository: 'acme/widgets', agent: 'agent-bot', feishu: { appId: 'cli_bot', brand: 'feishu', botId: 'ou_bot',
         name: 'Widgets Bot' } } },
@@ -342,6 +344,20 @@ const ROUTES: { [K in keyof Api]: Route<K> } = {
     server.settings = { ...server.settings, paused: body.paused }
     server.revisions.pause = (server.revisions.pause ?? 0) + 1
     return { paused: body.paused }
+  } },
+  'POST safety/halt': { body: true, answer: ({ body }) => {
+    server.safety = server.safety.active ? { ...server.safety, phase: 'halted', errors: [] }
+      : { active: true, generation: server.safety.generation + 1, at: '2026-01-01T00:00:00Z', by: 'panel', reason: body.reason,
+        phase: 'halted', errors: [] }
+    return server.safety
+  } },
+  'POST safety/resume': { body: true, answer: ({ body }) => {
+    const current = server.safety
+    if (body.generation !== current.generation) return refuse(409, 'Halt changed; reload before resuming')
+    if (current.active && (current.phase !== 'halted' || current.errors.length)) return refuse(409, 'Halt cleanup has not completed successfully')
+    const resumed = current.active
+    if (resumed) server.safety = { active: false, generation: current.generation + 1 }
+    return { resumed, safety: server.safety }
   } },
   'PUT settings/:block': { body: true, answer: ({ params: { block }, body }) => {
     const source = block.startsWith('source:') ? KINDS.find(kind => `source:${kind.kind}` === block) : undefined

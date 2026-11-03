@@ -16,7 +16,7 @@ The bundle defines `dsh-superagent-worker` for Executors and `dsh-superagent-rou
 
 Opening a blank managed Session in the Web UI can select the profile's default preset. dsh-superagent restores its role-specific preset before the first turn.
 
-Both presets run with `danger-full-access` as the operator's OS user and read messages from subscribed Threads. Account wrappers choose the agent's credentials by default; they do not isolate the process. A worker can execute programs by path and read the operator's home directory. For isolation, use a dedicated OS account containing only the agent's credentials.
+This fork defaults managed root Sessions to `workspace-write` with approval policy `never`; full access and Worker subagents require explicit operator configuration. The Router uses a separate `router-work` directory, not the state database directory. Durable budgets, operator halt and their limits are configured and controlled as described below. Account wrappers choose credentials; they do not isolate the process. Neither workspace separation nor loopback API headers are an OS authorization boundary. Use a dedicated, unprivileged OS account/VM containing only the agent's credentials, restrict the management plane, and require human review and manual merge through server-side branch protection.
 
 ## Prerequisites
 
@@ -73,7 +73,7 @@ Both presets run with `danger-full-access` as the operator's OS user and read me
 Run this block once, on a machine that has no `superagent` profile yet:
 
 ```sh
-npm install -g @deepseek-ai/dsh@0.2.1-rc.3
+npm install -g @deepseek-ai/dsh@0.2.1-rc.5
 git clone <this repository> dsh-superagent && cd dsh-superagent
 pnpm install && pnpm build
 dsh superagent --from-default-profile web --dump-config > /dev/null
@@ -93,9 +93,13 @@ Copy [examples/profile.cordis.patch.yml](../examples/profile.cordis.patch.yml) t
 | Key | Required | Meaning |
 | --- | --- | --- |
 | `stateDir` | yes | Absolute path: the database, the lock, the command shims in `worker-bin`, the agent's git configuration and, by default, the Ticket directories in `work`. Back it up before upgrades |
+| `executionPermission` | no | `workspace-write` by default; `danger-full-access` requires explicit operator opt-in and a restart. Neither is a substitute for deployment isolation |
+| `allowWorkerSubagents` | no | `false` by default; enabling requires restart and separate acceptance because scheduling budgets cover root Workers only |
+| `maxWorkerSteps`, `maxWorkerTurns` | no | Durable per-Ticket root scheduling limits, default 120 steps / 12 turns; 1..100000; volatile changes do not clear usage |
+| `inferredAdmissionsPerDay` | no | New inferred Tickets per UTC day, default 0 (disabled), 0..100000; explicit requests are unaffected |
 | `promptMaxChars`, `admissionContextMaxPages`, `admissionContextTimeoutMs` | no | The largest saved prompt configuration, and how many Thread pages one assessment reads within what time |
 
-After the first start, edit machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Changes apply without restart. `stateDir` cannot be changed there. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
+After the first start, edit volatile numeric machine limits in **Settings → Deployment** or the DeepSeek Harness Plugin Manager. Those changes apply without restart. `stateDir`, permission mode and delegation are read-only there; configure them explicitly in the dedicated profile and restart. Invalid values or unknown configuration keys prevent startup; the log identifies the key.
 
 ## Start and stop
 
@@ -162,17 +166,19 @@ The panel uses a local HTTP API that agents can also call. `SETUP.md` uses it to
 
 Send requests to `http://127.0.0.1:<port>/orchestrator/api/` with `x-orchestrator-request: 1`. The host must be `127.0.0.1:<port>` or `localhost:<port>`. Missing headers or an `Origin` from another site receive 403.
 
-API saves have the panel's permissions. They can change execution environment and setup account fields, unlike saves made through the main Session's tools.
+API saves have the panel's permissions. They can change execution environment and setup account fields, unlike saves made through the main Session's tools. This is not authenticated human identity: a same-user unrestricted shell may reach the loopback API. Isolate the management plane at the OS/network layer. Halt release is an operator control and is deliberately absent from managed-agent tools; headers and a `panel` label alone are not an authorization boundary.
 
 Agents may rely on these routes and fields. The other routes in `src/app/api.ts` serve the panel and change with it.
 
 | Request | Answer |
 | --- | --- |
-| `GET state` | What every page reads: `setup`, with `problem` and `feishuProblem`, each `null` or a setup problem with `place`, `code`, `values` and `detail`, and `accounts` once setup resolved them; `health`, an entry per part, below, with `state` (`starting`, `ready`, `paused` or `error`), `detail` and `at`; `load`, the Executor Sessions `running`, the Tickets `queued` and `maxWorkers`; `paused`; and `masterId` |
+| `GET state` | What every page reads: `setup`, with `problem` and `feishuProblem`, each `null` or a setup problem with `place`, `code`, `values` and `detail`, and `accounts` once setup resolved them; `health`, an entry per part, below, with `state` (`starting`, `ready`, `paused` or `error`), `detail` and `at`; `load`, the Executor Sessions `running`, the Tickets `queued` and `maxWorkers`; `paused`; durable `safety` halt status (generation/phase/errors); and `masterId` |
 | `GET settings` | `blocks`: `policy`, `eval` and `executor`, each with its `value` and its `revision`; `sources`: the Source instances, each with `id`, `kind`, `installed`, its block's `value`, `{"enabled": …, "config": {…}}`, and `revision`, its kind's form, and its setup `problem` when it has one; `policyVersion`; and `environment`, the execution environment's `root` and `variables` |
 | `GET sources` | Each Source's status: `state` (`missing`, `off`, `error`, `setup`, `starting`, `paused` or `ready`), the `health` of its parts, its setup `problem`, the last day's `stats`, the Triggers it `filtered` in that day, and the messages it `dropped` in that day, newest drop first, each with its `channel`, `preview`, `ticket` (`id` and `title`) when it was for one, its `thread` when the store has it, and `dropped.at` and `dropped.reason`, `channelGone` or `channelIgnored` |
 | `PUT settings/<block>` with `{"value": …, "revision": n}` | Saves one block: `saved`, the block's new `revision`, `policy_changed` and `restarting`. `value` is the whole block, as `GET settings` holds it; a missing key takes its default |
-| `POST executor/pause` with `{"paused": true}` or `false` | Pauses or resumes processing: `paused` |
+| `POST executor/pause` with `{"paused": true}` or `false` | Pauses or resumes dispatch: `paused`; does not cancel running work or release a safety halt |
+| `POST safety/halt` with `{"reason":"..."}` | Operator emergency stop: durable generation/phase/errors, then cancellation and cleanup; the persisted latch remains until explicit operator release |
+| `POST safety/resume` with `{"generation": n}` | Operator release after confirmed cleanup and generation CAS; leaves budgets and independent dispatch pause unchanged |
 | `POST setup/check` | Runs setup again by restarting dsh-superagent: `restarting: true`. Refused when setup has nothing to fix |
 | `POST policy-sync/<source id>` | Syncs that Source's allowed list now: `policy`, the Source's part as saved |
 | `GET prompts`, `PUT prompts` with `{"config", "baseRevision"}` | Reads the prompt configuration: `current`, with its `revision` and `config`, `defaults`, `sections`, the team sections in the order Sessions read them, `skillName`, the pattern of a team skill's name, `builtin`, the names a team skill cannot take, and `skillPrefix`, which Sessions load a skill's name under. Or saves it: the new `revision` |
@@ -194,7 +200,8 @@ A refusal has a status and `error`, its English text:
 
 - 400: an invalid value (`issues`, each with its `path`), a failed account check (`setup`), a fixed refusal (`code` and `values`), or a body that is not JSON or is too large.
 - 404: something that does not exist.
-- 409: a stale revision.
+- 409: a stale revision or halt generation, incomplete cleanup, or Runtime not ready for resume.
+- 423: a durable halt blocks Ticket retry.
 - 500: anything else.
 
 The blocks:
@@ -233,7 +240,7 @@ From an allowed GitHub account, open an Issue or post a comment containing `@<ag
 ## Upgrade
 
 1. Wait until no Executor is in the middle of a turn.
-2. Back up `<stateDir>/orchestrator.sqlite`.
+2. Prepare a consistent SQLite backup of the state. Do not copy only a live WAL database's main file; use SQLite's supported backup API/tool or a verified snapshot after all writers have stopped. Preserve the original and rehearse recovery separately.
 3. Run `git pull && pnpm install && pnpm build`.
 4. Run `scripts/dsh-superagent restart` and inspect its status.
 

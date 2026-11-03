@@ -113,6 +113,16 @@ export function subagentRuntime(agents: Map<string, FakeAgent>) {
     }),
     listChildren: vi.fn(async (id: string) => [...children].filter(([, child]) => child.parent === id).map(([childId]) => ({ id: childId }))),
     drainChildren: vi.fn(async (_parent: { id: string }, ids: readonly string[]) => { for (const id of ids) settle(id) }),
+    listDescendants: vi.fn(async (root: string) => {
+      const rows: { kind: 'child'; id: string; mode: 'continuable'; label: string; activity: 'running' | 'inactive'; hasChildren: boolean; parentId: string; depth: number }[] = []
+      const visit = (parent: string, depth: number) => {
+        for (const [id, child] of children) if (child.parent === parent) {
+          rows.push({ kind: 'child', id, mode: 'continuable', label: id, activity: child.live ? 'running' : 'inactive', hasChildren: false, parentId: parent, depth })
+          visit(id, depth + 1)
+        }
+      }
+      visit(root, 1); return rows
+    }),
     drainDescendants: vi.fn(async (parents: readonly { id: string }[]) => {
       for (const parent of parents) {
         closed.add(parent.id)
@@ -125,14 +135,34 @@ export function subagentRuntime(agents: Map<string, FakeAgent>) {
     if (closed.has(parent)) throw new Error('DRAINING: the Session admits no new subagents')
     const id = `child-${children.size + 1}`
     children.set(id, { parent, live: true, settled: Promise.withResolvers<void>() })
-    agents.set(id, { id, status: 'running', session: { header: { parentSession: parent } } } as never)
+    agents.set(id, { id, status: 'running', session: { header: { parentSession: parent } },
+      cancel: vi.fn(() => { const agent = agents.get(id); if (agent) agent.status = 'idle' }), whenIdle: async () => {},
+      followup: vi.fn(() => { const agent = agents.get(id); if (agent) agent.status = 'running' }), steer: vi.fn(), inject: vi.fn() } as never)
     return id
   }
   return { service, settle, spawn, live: (id: string) => !!children.get(id)?.live }
 }
 
+/** Exact permission/directory seams; preset keys deliberately differ from the sandbox modes. */
+export function safetyServices(): {
+  permissionPresets: { catalog(): { options: { value: string; name: string }[] }; resolve(name: string): { sandbox: string | undefined; approval: string }; set: Mock<(session: unknown, name: string) => void> }
+  approval: { setPolicy: Mock<(agent: unknown, policy: string) => void> }
+  workingDirectory: { get(session: { header: { cwd: string } }): string; set: Mock<(agent: { session: { header: { cwd: string } } }, path: string) => Promise<string>> }
+} {
+  type Session = { header: { cwd: string } }
+  const directories = new WeakMap<object, string>()
+  const modes: Record<string, string> = { restricted: 'workspace-write', unrestricted: 'danger-full-access' }
+  return {
+    permissionPresets: { catalog: () => ({ options: Object.keys(modes).map(value => ({ value, name: value })) }),
+      resolve: (name: string) => ({ sandbox: modes[name], approval: 'ask' }), set: vi.fn() },
+    approval: { setPolicy: vi.fn() },
+    workingDirectory: { get: (session: Session) => directories.get(session) ?? session.header.cwd,
+      set: vi.fn(async (agent: { session: Session }, path: string) => { directories.set(agent.session, path); return path }) },
+  }
+}
+
 /** @param seed - writes to the database before the Runtime opens it, such as records an earlier version stored. */
-export async function startRuntime(seed?: (store: Store) => void) {
+export async function startRuntime(seed?: (store: Store) => void, machineOverrides: Partial<import('../../src/deployment.ts').Machine> = {}) {
   const directory = mkdtempSync(join(tmpdir(), 'orchestrator-host-'))
   const AGENT = join(directory, 'agent-gh'), BOT = join(directory, 'lark-bot')
   const repository = { default_branch: 'master', permissions: { push: true } }
@@ -152,29 +182,40 @@ export async function startRuntime(seed?: (store: Store) => void) {
   }
   /** A prepare command (`sh -c`) waits for this while it is set. */
   const hooks: { prepare?: Promise<void> } = {}
-  const subprocess = { spawn: vi.fn((spec: { argv: readonly string[] }) => {
+  const subprocess = { spawn: vi.fn((spec: { argv: readonly string[]; signal?: AbortSignal }) => {
     const argv = [...spec.argv]
     while (argv[0] === 'env' || /^[A-Z_]+=/.test(argv[0] ?? '')) argv.shift()
     const reader = (text: string) => ({ readFrom: () => ({ text, nextOffset: text.length, lossy: false }) })
     const exited = { exitCode: 0, signal: null }
-    const done = argv[0] === 'sh' && hooks.prepare ? hooks.prepare.then(() => exited) : Promise.resolve(exited)
+    const prepare = argv[0] === 'sh' ? hooks.prepare : undefined
+    const done = prepare ? new Promise<{ exitCode: number | null; signal: string | null }>(resolve => {
+      const abort = () => { spec.signal?.removeEventListener('abort', abort); resolve({ exitCode: null, signal: 'SIGTERM' }) }
+      spec.signal?.addEventListener('abort', abort, { once: true })
+      if (spec.signal?.aborted) abort()
+      void prepare.then(() => { spec.signal?.removeEventListener('abort', abort); resolve(exited) })
+    }) : Promise.resolve(exited)
     return { done, collected: { stdout: reader(answers[argv.join(' ')] ?? ''), stderr: reader('') } }
   }) }
   const agents = new Map<string, FakeAgent>()
   /** Each Session's next step, which takes the messages that wait for one. */
   const steps = new Map<string, () => void>(), claims = new Map<string, () => void>()
   const tools = new Map<string, Map<string, RegisteredTool>>()
+  const guards = new Map<string, ((execution: { name: string; arguments: unknown }) => string | undefined)[]>()
   const deliveries = vi.fn<(request: Delivery) => void>()
   let http!: HttpHandler
   const resolveDefault = async (id: string) => agents.has(id) ? { agent: agents.get(id) } : { error: { code: 'session/not-found' } }
+  let creation = Date.now()
   const controller = {
-    create: vi.fn(async ({ sessionId }: { sessionId: string }) => {
+    create: vi.fn(async ({ sessionId, workspaceId, agentPreset }: { sessionId: string; workspaceId: string; agentPreset: string }) => {
       if (agents.has(sessionId)) return
       const agentCtx = new Context()
       const sessionTools = new Map<string, RegisteredTool>()
       tools.set(sessionId, sessionTools)
       const register = (tool: RegisteredTool) => { sessionTools.set(tool.name, tool); return () => sessionTools.delete(tool.name) }
-      agentCtx.reflect.provide('tools', { register, get: () => undefined, restrict: vi.fn(() => () => {}), guard: vi.fn(() => () => {}) })
+      const checks: ((execution: { name: string; arguments: unknown }) => string | undefined)[] = []
+      guards.set(sessionId, checks)
+      agentCtx.reflect.provide('tools', { register, get: () => undefined, restrict: vi.fn(() => () => {}),
+        guard: vi.fn((check: typeof checks[number]) => { checks.push(check); return () => { const at = checks.indexOf(check); if (at >= 0) checks.splice(at, 1) } }) })
       agentCtx.reflect.provide('skills', { register: () => () => {} })
       agentCtx.reflect.provide('systemPrompt', { section: () => () => {} })
       const inbox = { nextTurn: [] as UserMessage[], nextStep: [] as UserMessage[],
@@ -210,7 +251,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
         turn++
         take(true)
       })
-      const session = { id: sessionId, snapshotEvents: () => [], requestHeader: () => undefined, append: vi.fn() }
+      const session = { id: sessionId, header: { createdAt: creation++, cwd: workspaceId, agentPreset }, snapshotEvents: () => [], requestHeader: () => undefined, append: vi.fn() }
       let status = 'idle'
       const idle: (() => void)[] = []
       // A cancel drops the inbox unless kept, and the turn it stops ends a moment later, which DSH says.
@@ -239,7 +280,7 @@ export async function startRuntime(seed?: (store: Store) => void) {
   const jobs = jobRegistry(id => agents.get(id))
   const subagents = subagentRuntime(agents)
   const services = { agents, llm: { resolveCallConfig: vi.fn(async (value: unknown) => value) }, sessionController: controller,
-    sessionPersistence: persistence, workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) }, permissionPresets: { set: () => {} }, subprocess, webServer,
+    sessionPersistence: persistence, workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) }, ...safetyServices(), subprocess, webServer,
     jobs: jobs.service, subagents: subagents.service }
   const ctx = new Context()
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
@@ -249,7 +290,8 @@ export async function startRuntime(seed?: (store: Store) => void) {
   seeded.saveSettings(SettingsSchema.parse({ ...seeded.settings(), sources }))
   seed?.(seeded)
   seeded.close()
-  const runtime = new Runtime(ctx, testMachine({ stateDir: directory }), vi.fn())
+  const machine = testMachine({ stateDir: directory, ...machineOverrides })
+  const runtime = new Runtime(ctx, machine, vi.fn())
   await runtime.ready
   runtime.sources.register(feishuKind); runtime.sources.register(githubKind)
   const settings = runtime.store.settings()
@@ -294,6 +336,6 @@ export async function startRuntime(seed?: (store: Store) => void) {
   /** A step of the worker claims what waits for it, and is cut off before the Session took it. */
   const claim = (sessionId: string) => { claims.get(sessionId)!() }
   return { runtime, ctx, directory, agents, tools, deliveries, relays, candidates, runTool, route, acceptedTicket, api, controller, subprocess, hooks, resolveDefault, stop,
-    jobs, subagents, step, claim }
+    jobs, subagents, step, claim, machine, services, guards }
 }
 export type Host = Awaited<ReturnType<typeof startRuntime>>

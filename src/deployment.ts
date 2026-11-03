@@ -16,6 +16,16 @@ const absolute = (description: string) => s.string().pattern(ABSOLUTE_PATH).desc
 /** Plugin configuration of the dsh-superagent entry. Volatile fields apply without a restart because dsh-superagent reads them on each use; changing `stateDir` remounts the plugin. */
 export const Config = s.object({
   stateDir: absolute('Directory for the database, locks, worker shims, the agent\'s git configuration and, by default, the ticket directories.').required(),
+  executionPermission: s.union(['workspace-write', 'danger-full-access']).default('workspace-write')
+    .description('Managed Session sandbox mode. Full access requires explicit operator opt-in; workspace-write does not guarantee network or CLI access.'),
+  allowWorkerSubagents: s.boolean().default(false)
+    .description('Allow Worker subagents. Step/turn budgets cover root Workers only, not nested agents, tokens or money.'),
+  maxWorkerSteps: s.number().min(LIMITS.maxWorkerSteps.min).max(LIMITS.maxWorkerSteps.max).step(1).default(120)
+    .description('Maximum admitted root Worker steps per Ticket across turns, retries and restarts.').volatile(),
+  maxWorkerTurns: s.number().min(LIMITS.maxWorkerTurns.min).max(LIMITS.maxWorkerTurns.max).step(1).default(12)
+    .description('Maximum admitted root Worker turns per Ticket across sessions and restarts.').volatile(),
+  inferredAdmissionsPerDay: s.number().min(LIMITS.inferredAdmissionsPerDay.min).max(LIMITS.inferredAdmissionsPerDay.max).step(1).default(0)
+    .description('Maximum new inferred Tickets per UTC day; zero disables inferred admissions. Explicit requests are unaffected.').volatile(),
   promptMaxChars: s.number().min(LIMITS.promptMaxChars.min).max(LIMITS.promptMaxChars.max).step(1).default(100000)
     .description('Largest saved prompt configuration, in characters.').volatile(),
   admissionContextMaxPages: s.number().min(LIMITS.admissionContextMaxPages.min).max(LIMITS.admissionContextMaxPages.max).step(1).default(10)
@@ -26,6 +36,11 @@ export const Config = s.object({
 export type DeploymentConfig = ReturnType<typeof Config>
 export interface Machine {
   stateDir: string
+  executionPermission: 'workspace-write' | 'danger-full-access'
+  allowWorkerSubagents: boolean
+  maxWorkerSteps: Volatile<number>
+  maxWorkerTurns: Volatile<number>
+  inferredAdmissionsPerDay: Volatile<number>
   promptMaxChars: Volatile<number>
   admissionContextMaxPages: Volatile<number>
   admissionContextTimeoutMs: Volatile<number>
@@ -40,8 +55,10 @@ const MOVED: Record<string, string> = {
 export function machineOf(config: DeploymentConfig): Machine {
   const unknown = Object.keys(config).filter(key => !(key in (Config.dict ?? {})))
   if (unknown.length) throw new Error(`dsh-superagent configuration has keys it does not use: ${unknown.map(key => MOVED[key] ? `${key} (now ${MOVED[key]})` : key).join(', ')}; docs/006-deployment.md lists the keys`)
-  const { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
-  return { stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
+  const { stateDir, executionPermission, allowWorkerSubagents, maxWorkerSteps, maxWorkerTurns, inferredAdmissionsPerDay,
+    promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs } = config
+  return { stateDir, executionPermission, allowWorkerSubagents, maxWorkerSteps, maxWorkerTurns, inferredAdmissionsPerDay,
+    promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }
 }
 
 export const GithubAccountsSchema = z.object({

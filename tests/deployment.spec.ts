@@ -45,8 +45,10 @@ describe('configuration schema', () => {
     const read = machineOf(Config({ stateDir: join(dir, 'state') }))
     // Limits are volatile references that the loader updates in place and callers read when used.
     expect({ ...read, promptMaxChars: read.promptMaxChars.get(), admissionContextMaxPages: read.admissionContextMaxPages.get(),
-      admissionContextTimeoutMs: read.admissionContextTimeoutMs.get() })
-      .toEqual({ stateDir: join(dir, 'state'), promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000 })
+      admissionContextTimeoutMs: read.admissionContextTimeoutMs.get(), maxWorkerSteps: read.maxWorkerSteps.get(),
+      maxWorkerTurns: read.maxWorkerTurns.get(), inferredAdmissionsPerDay: read.inferredAdmissionsPerDay.get() })
+      .toEqual({ stateDir: join(dir, 'state'), promptMaxChars: 100000, admissionContextMaxPages: 10, admissionContextTimeoutMs: 15000,
+        executionPermission: 'workspace-write', allowWorkerSubagents: false, maxWorkerSteps: 120, maxWorkerTurns: 12, inferredAdmissionsPerDay: 0 })
     expect(() => Config(minimal({ stateDir: 'relative/dir' }))).toThrow()
     expect(() => Config(minimal({ stateDir: '~/dir' }))).toThrow()
     expect(() => Config(minimal({ stateDir: 'C:relative' }))).toThrow()

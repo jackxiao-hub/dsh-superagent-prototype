@@ -33,6 +33,8 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [006 Deployment](docs/006-deployment.md): manual setup, configuration, upgrades and troubleshooting
 - [007 Architecture](docs/007-architecture.md)
 - [008 Cookbook](docs/008-cookbook.md): adding a Source
+- [009 Replay](docs/009-replay.md): offline, deterministic domain acceptance
+- [010 Safety](docs/010-safety.md): defaults, durable root budgets, operator halt and limits
 
 ## Development
 

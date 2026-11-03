@@ -68,6 +68,8 @@ export interface ExecutorHost {
   /** The `worker` health entry, which reports whether background worker event handling failed. */
   readonly health: HealthEntry
   readonly machine: Pick<Machine, 'stateDir'>
+  /** Emergency halt is stronger than pause: it also suppresses idle reconciliation and retry timers. */
+  halted(): boolean
   readonly lifetime: AbortSignal
   /** Session manager for worker sessions and for relaying worker reports to the main Session. */
   readonly sessions: Pick<Sessions, 'ensure' | 'prompt' | 'promptedId' | 'relay' | 'holds'>
@@ -224,6 +226,7 @@ export class DshExecutor implements Executor {
   private readonly personal = new Map<string, string>()
   /** The timers of workers that go on after a passing failure, which dispose clears. */
   private readonly timers = new Set<ReturnType<typeof setTimeout>>()
+  private scheduling = new AbortController()
   /** Registers the `launch` and `delivery` effect handlers; both are held (concurrency limit 0) while processing is paused. */
   constructor(private readonly host: ExecutorHost) {
     this.slots = new WorkerSlots(() => host.store.tickets.open().filter(ticket => this.running(ticket)).map(ticket => ticket.id),
@@ -250,15 +253,16 @@ export class DshExecutor implements Executor {
     const command = this.host.store.settings().executor.prepare.trim()
     const env = Object.fromEntries(this.host.environment(ticket).map(variable => [variable.key, variable.value]))
     // Enforce a timeout so a hung prepare command (such as on a credential prompt) fails the ticket instead of holding a worker slot indefinitely.
-    const signal = AbortSignal.any([this.host.lifetime, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
+    const signal = AbortSignal.any([this.host.lifetime, this.scheduling.signal, AbortSignal.timeout(PREPARE_TIMEOUT_MS)])
     if (command) await runAsWorker(this.host.context.subprocess, ['sh', '-c', command], dirname(directory), signal, env)
       .catch(async (error: unknown) => {
         // Remove an empty directory left by a failed prepare command so a later retry does not treat it as already prepared.
         await rmdir(directory).catch(() => { /* Absent, or holding what the command wrote, which the output explains. */ })
         throw new PrepareFailed(`The prepare command failed: ${error instanceof Error ? error.message : String(error)}`)
       })
+    signal.throwIfAborted()
     await mkdir(directory, { recursive: true })
-    await verifyDirectory(directory, this.host.context.subprocess, this.host.lifetime)
+    await verifyDirectory(directory, this.host.context.subprocess, signal)
   }
   /** Enqueues a `launch` effect for an accepted or resumed assignment; launches start in queue order as worker slots free up. */
   start(ticket: Ticket, assignment: Assignment): void {
@@ -278,6 +282,7 @@ export class DshExecutor implements Executor {
       // A failed prepare command is not retried automatically because an existing directory counts as prepared, so retrying
       // would treat whatever a failed prepare command left behind in the directory as a prepared workspace; instead the
       // ticket is marked failed and waits until new human input or an explicit retry arrives.
+      if (this.host.halted()) throw new Later('Processing is halted')
       if (this.host.closing() || error instanceof Later) throw error
       if (!(error instanceof PrepareFailed) && this.retries(`launch:${assignmentId}`, error)) throw error
       this.launchFailed(ticketId, assignmentId, error)
@@ -316,7 +321,8 @@ export class DshExecutor implements Executor {
           }
           if (input) await this.deliverInput(ticket, assignment, input)
         } catch (error) {
-          if (this.host.closing() || error instanceof Later) throw error
+          if (this.host.halted()) throw new Later('Processing is halted')
+      if (this.host.closing() || error instanceof Later) throw error
           const current = this.host.store.tickets.get(ticketId)
           if (!current || !liveTicket(current) || runningAssignment(current)?.id !== assignment.id) return
           this.host.engine.deliveryFailed(ticketId, assignment.id, String(error))
@@ -400,6 +406,23 @@ export class DshExecutor implements Executor {
     }
     await until(stop(), undefined, SHUTDOWN_STOP_MS)
   }
+  /** Stop retry scheduling and idle background reconciliation without terminating the reusable Executor. */
+  suspend(): void {
+    this.scheduling.abort()
+    for (const timer of this.timers) clearTimeout(timer)
+    this.timers.clear(); this.resuming.clear()
+    for (const look of this.settling.values()) look.abort()
+    this.settling.clear()
+  }
+  /** Host-enforced root Worker budget handoff; the Ticket stays open but no new model step was admitted. */
+  budgetExceeded(ticketId: string, reason: 'step-limit' | 'turn-limit'): void {
+    const ticket = this.host.store.tickets.get(ticketId)
+    if (!ticket || !liveTicket(ticket) || !runningAssignment(ticket)) return
+    this.host.engine.report(ticketId, { state: 'blocked', summary: `Root Worker scheduling budget exceeded (${reason}); an operator must raise the limit before continuing. Nested agents, tokens and money are not included in this budget.` })
+    this.settling.get(ticketId)?.abort()
+    this.host.context.agents.get(workerSessionId(ticketId) as SessionId)?.cancel({ kind: 'hook', reason: 'Worker scheduling budget exceeded' }, { keepInbox: true })
+    this.stopWork(ticketId, 'Worker scheduling budget exceeded', true)
+  }
   /** Number of open tickets whose worker holds a worker slot: its turn runs, or its shell jobs or subagents still run after its turn ended. */
   activeCount(): number { return this.host.store.tickets.open().filter(ticket => this.running(ticket)).length }
   /** Whether a ticket's worker holds a worker slot: its turn runs, or its shell jobs or subagents do after its turn ended. */
@@ -480,7 +503,7 @@ export class DshExecutor implements Executor {
       // A turn that starts ends the look at its worker's background work; the turn's own idle looks afresh.
       if (status === 'running') { this.settling.get(ticketOfSession(agent.id) ?? '')?.abort(); return }
       // The turn a stop of the worker's subagents woke and cancelled is no turn of the worker's.
-      if (status !== 'idle' || cancelled.delete(agent) || this.host.closing()) return
+      if (status !== 'idle' || cancelled.delete(agent) || this.host.closing() || this.host.halted()) return
       const ticket = this.ticketOf(agent)
       const assignment = ticket && runningAssignment(ticket)
       if (ticket && assignment && liveTicket(ticket)) void this.background(this.workerIdle(ticket, assignment, agent))
@@ -505,7 +528,7 @@ export class DshExecutor implements Executor {
     this.disposers.push(ctx.on('agent/error', ({ agent, error }) => {
       const ticket = this.ticketOf(agent)
       const assignment = ticket && runningAssignment(ticket)
-      if (!ticket || !assignment || !liveTicket(ticket) || this.host.closing()) return
+      if (!ticket || !assignment || !liveTicket(ticket) || this.host.closing() || this.host.halted()) return
       if (this.retries(assignment.id, error)) { this.resumeAfter(ticket.id, assignment.id, error); return }
       void this.background(Promise.resolve().then(() => { this.failed(ticket.id, String(error)) }))
     }))
@@ -522,6 +545,8 @@ export class DshExecutor implements Executor {
    * while failed launches (`waitsForPerson`) wait for a person's message or a retry.
    */
   resume(): void {
+    if (this.host.halted() || this.host.closing()) return
+    if (this.scheduling.signal.aborted) this.scheduling = new AbortController()
     // Launch pending tickets oldest first (in acceptance order).
     for (const ticket of this.host.store.tickets.open().sort((a, b) => a.createdAt.localeCompare(b.createdAt))) {
       const running = runningAssignment(ticket), latest = latestAssignment(ticket)
@@ -557,7 +582,7 @@ export class DshExecutor implements Executor {
     const text = `Your last turn failed for a passing reason (${String(error).slice(0, 200)}). Continue the assignment where it stopped.`
     this.resuming.add(assignmentId)
     const go = () => {
-      if (this.host.closing()) return
+      if (this.host.closing() || this.host.halted()) { this.resuming.delete(assignmentId); return }
       const ticket = this.host.store.tickets.get(ticketId)
       if (!ticket || !liveTicket(ticket) || runningAssignment(ticket)?.id !== assignmentId) { this.resuming.delete(assignmentId); return }
       // Wait while processing is paused or no wake slot is free.
@@ -617,7 +642,7 @@ export class DshExecutor implements Executor {
       return ((report?.state === 'ready' || !!stored.attention) && !since) || waitsForPerson(stored)
     }
     const before = live()
-    if (!before || this.host.closing()) return
+    if (!before || this.host.closing() || this.host.halted()) return
     // A turn a person started in the Session is the person's work, which goes on in the background as any turn's does.
     const report = runningAssignment(before)?.report, person = this.personal.get(ticket.id)
     // The worker read what reached it before a turn that ended: one it handed off with, or one whose background work ended.
@@ -638,7 +663,7 @@ export class DshExecutor implements Executor {
     try { quiet = await untilQuiet(this.host.context, agent, AbortSignal.any([this.host.lifetime, look.signal, limit.signal]), left) }
     finally { clearTimeout(timer); if (this.settling.get(ticket.id) === look) this.settling.delete(ticket.id) }
     const current = live()
-    if (this.host.closing() || look.signal.aborted || (!quiet && !limit.signal.aborted) || !current || this.resuming.has(idle.id)) return
+    if (this.host.closing() || this.host.halted() || look.signal.aborted || (!quiet && !limit.signal.aborted) || !current || this.resuming.has(idle.id)) return
     if (quiet) this.host.engine.turnEnded(ticket.id, idle.id)
     let stopped = ''
     if (!quiet) {

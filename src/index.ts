@@ -5,7 +5,7 @@ import { Runtime } from './app/runtime.ts'
 import { Config, machineOf, type DeploymentConfig } from './deployment.ts'
 
 export const name = 'dsh-superagent'
-export const inject = ['agents', 'sessionController', 'sessionPersistence', 'workspaceRegistry', 'permissionPresets', 'tools', 'systemPrompt', 'skills', 'webServer', 'llm', 'subprocess']
+export const inject = ['agents', 'sessionController', 'sessionPersistence', 'workspaceRegistry', 'workingDirectory', 'permissionPresets', 'approval', 'tools', 'systemPrompt', 'skills', 'webServer', 'llm', 'subprocess']
 export { Config }
 export async function apply(ctx: Context, config: DeploymentConfig): Promise<void> {
   const machine = machineOf(config)

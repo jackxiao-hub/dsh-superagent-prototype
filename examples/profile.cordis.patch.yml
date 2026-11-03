@@ -7,6 +7,13 @@
 - id: dsh-superagent
   config:
     stateDir: <absolute path, for example /home/me/.dsh/state/superagent>
+    # Conservative defaults; do not opt into full access in a personal profile.
+    executionPermission: workspace-write
+    allowWorkerSubagents: false
+    maxWorkerSteps: 120
+    maxWorkerTurns: 12
+    # Explicit requests still work; inferred auto-admissions remain disabled.
+    inferredAdmissionsPerDay: 0
 # Feishu is optional: uncomment to enable its Source, then set the bot's lark-cli on the Feishu Source.
 # - id: dsh-superagent-feishu
 #   disabled: false

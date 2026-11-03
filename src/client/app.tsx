@@ -4,7 +4,7 @@ import type { SearchView } from './api.ts'
 import { Button, Dot, Icon, Input, Modal, SegmentedTabs } from './controls.tsx'
 import type { DeploymentForm } from './deployment.tsx'
 import { EvalStatus } from './eval.tsx'
-import { ExecutionStatus } from './execution.tsx'
+import { ExecutionStatus, SafetyControl } from './execution.tsx'
 import { ticketMark } from './marks.ts'
 import { GLOSSARY, GLOSSARY_VALUES, en, zh, type DshSuperagentKey } from './locales.ts'
 import { OverviewPage } from './overview.tsx'
@@ -124,6 +124,7 @@ function Header({ masterId }: { masterId: string | undefined }) {
   return <header className="dt-head">
     <div className="dt-head-title"><h1 className="dt-title">{t('title')}</h1></div>
     <div className="dt-toolbar">
+      <SafetyControl />
       <form ref={search} className="dt-search" role="search" onSubmit={submit} onKeyDown={event => { if (event.key === 'Escape') show() }}>
         <Input type="search" icon={<Icon name="search" />} value={query} placeholder={t('searchPlaceholder')} aria-label={t('searchLabel')}
           onChange={event => { setQuery(event.target.value); if (!event.target.value) show() }} />

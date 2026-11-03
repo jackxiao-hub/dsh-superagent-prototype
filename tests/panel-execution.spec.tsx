@@ -1,9 +1,9 @@
 // @vitest-environment jsdom
 // The Execution status, a Ticket, and the Execution settings.
 import { act } from 'react'
-import { expect, it } from 'vitest'
+import { expect, it, vi } from 'vitest'
 import { en, zh } from '../src/client/locales.ts'
-import { usePanel, mount, remount, all, find, tab, click, type, text, field, at } from './fixtures/panel.tsx'
+import { usePanel, mount, remount, settle, all, find, tab, click, type, text, field, at } from './fixtures/panel.tsx'
 import { MEMBER, server, ticketSummary, threadSummary } from './fixtures/panel-server.ts'
 
 usePanel()
@@ -38,6 +38,63 @@ it('lists Tickets under Execution by who they wait on, with the Executor state a
   await click(tab(zh['tab.settings']))
   await click(zh.save)
   expect(server.settings).toMatchObject({ paused: true, executor: { maxWorkers: 4 } })
+})
+
+it('confirms a global halt from any tab and releases only its displayed generation without clearing dispatch pause', async () => {
+  server.settings = { ...server.settings, paused: true }
+  await mount()
+  await click(zh.safetyHalt)
+  expect(server.requests.some(request => request.path === 'safety/halt')).toBe(false)
+  await click(zh.cancel)
+  expect(server.safety.active).toBe(false)
+  await click(zh.safetyHalt)
+  await click(zh.confirm)
+  expect(server.requests.find(request => request.path === 'safety/halt')).toMatchObject({ method: 'POST', body: { reason: zh.safetyOperatorReason } })
+  expect(server.safety).toMatchObject({ active: true, generation: 1, phase: 'halted', errors: [] })
+  expect(text()).toContain(zh.safetyHeld)
+  await click(zh.safetyResume)
+  expect(document.querySelector('[role="dialog"]')?.textContent).toContain('第 1 代急停')
+  await click(zh.confirm)
+  expect(server.requests.find(request => request.path === 'safety/resume')).toMatchObject({ method: 'POST', body: { generation: 1 } })
+  expect(server.safety).toEqual({ active: false, generation: 2 })
+  expect(server.settings.paused).toBe(true)
+})
+
+it('does not offer release until cleanup is confirmed, and sends cleanup retries to the halt operation', async () => {
+  server.safety = { active: true, generation: 3, at: '2026-01-01T00:00:00Z', by: 'panel', reason: 'operator', phase: 'halted', errors: ['child remains running'] }
+  await mount()
+  expect(all('button').some(button => button.textContent === zh.safetyResume)).toBe(false)
+  expect(text()).toContain(zh.safetyCleanupFailed)
+  await click(zh.safetyRetryCleanup)
+  await click(zh.confirm)
+  expect(server.requests.filter(request => request.path === 'safety/halt')).toHaveLength(1)
+  expect(server.requests.some(request => request.path === 'safety/resume')).toBe(false)
+  expect(find(zh.safetyResume)).toBeTruthy()
+})
+
+it('closes a release confirmation if polling observes a different halt generation', async () => {
+  const visible = vi.spyOn(document, 'hidden', 'get').mockReturnValue(false)
+  try {
+    server.safety = { active: true, generation: 1, at: '2026-01-01T00:00:00Z', by: 'panel', reason: 'first', phase: 'halted', errors: [] }
+    await mount()
+    await click(zh.safetyResume)
+    expect(document.querySelector('[role="dialog"]')).not.toBeNull()
+    server.safety = { ...server.safety, generation: 3, reason: 'new operator halt' }
+    await act(async () => { document.dispatchEvent(new Event('visibilitychange')) })
+    await settle()
+    expect(document.querySelector('[role="dialog"]')).toBeNull()
+    expect(server.requests.some(request => request.path === 'safety/resume')).toBe(false)
+  } finally { visible.mockRestore() }
+})
+
+it('keeps a newer halt set and shows the failure when release loses a race before polling', async () => {
+  server.safety = { active: true, generation: 1, at: '2026-01-01T00:00:00Z', by: 'panel', reason: 'first', phase: 'halted', errors: [] }
+  await mount()
+  await click(zh.safetyResume)
+  server.safety = { ...server.safety, generation: 3, reason: 'new operator halt' }
+  await click(zh.confirm)
+  expect(server.safety).toMatchObject({ active: true, generation: 3 })
+  expect(document.querySelector('.dt-toast')?.textContent).toContain('Halt changed')
 })
 
 it('stops an open Ticket from its page after confirmation', async () => {

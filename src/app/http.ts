@@ -10,6 +10,7 @@ import { PromptConflict, SKILL_NAME, SKILL_PREFIX, TEAM_SECTIONS, builtInBase, b
   from './prompts.ts'
 import { policyVersion } from '../policy.ts'
 import { SettingsConflict, type Settings } from './settings.ts'
+import { SafetyConflict, SafetyHalted, type Safety, type SafetyHalt } from './safety.ts'
 import { SetupError, type SetupProblem } from '../setup.ts'
 import { UserError, type EngineForPeople, type Ticket } from '../core/index.ts'
 import type { Deployment, Machine } from '../deployment.ts'
@@ -41,6 +42,10 @@ export interface HttpHost {
   readonly health: Record<string, Health>
   readonly machine: Machine
   readonly masterId: string
+  readonly safety: Pick<Safety, 'status' | 'assertRunning'>
+  /** Operator control-plane operations; not registered as managed-agent tools. The loopback API is not an OS authorization boundary. */
+  emergencyStop(reason: string): Promise<SafetyHalt>
+  resumeSafety(expectedGeneration: number): Promise<boolean>
   /** Resolves once startup finishes or setup determines what is still missing. */
   readonly ready: Promise<void>
   /** Resolved deployment; throws if read while waiting for setup (`!configured()`). */
@@ -86,13 +91,16 @@ function failure(error: unknown): [number, Record<string, unknown>] {
   if (error instanceof SetupError) return [400, { error: error.message, setup: error.problem }]
   if (error instanceof RouteError) return [error.status, { error: error.message }]
   if (error instanceof UserError) return [error.missing ? 404 : 400, { error: error.message, code: error.code, values: error.values }]
-  if (error instanceof SettingsConflict || error instanceof PromptConflict) return [409, { error: error.message }]
+  if (error instanceof SettingsConflict || error instanceof PromptConflict || error instanceof SafetyConflict) return [409, { error: error.message }]
+  if (error instanceof SafetyHalted) return [423, { error: error.message }]
   return [500, { error: error instanceof Error ? error.message : String(error) }]
 }
 
-function machineView({ stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs }: Machine) {
+function machineView({ stateDir, promptMaxChars, admissionContextMaxPages, admissionContextTimeoutMs, executionPermission,
+  allowWorkerSubagents, maxWorkerSteps, maxWorkerTurns, inferredAdmissionsPerDay }: Machine) {
   return { stateDir, promptMaxChars: promptMaxChars.get(), admissionContextMaxPages: admissionContextMaxPages.get(),
-    admissionContextTimeoutMs: admissionContextTimeoutMs.get() }
+    admissionContextTimeoutMs: admissionContextTimeoutMs.get(), executionPermission, allowWorkerSubagents,
+    maxWorkerSteps: maxWorkerSteps.get(), maxWorkerTurns: maxWorkerTurns.get(), inferredAdmissionsPerDay: inferredAdmissionsPerDay.get() }
 }
 function setupView(runtime: HttpHost) {
   const resolved = runtime.configured() ? runtime.deployment : undefined
@@ -106,7 +114,7 @@ export function stateView(runtime: HttpHost) {
   const settings = runtime.store.settings()
   return { setup: setupView(runtime), load: { ...executorLoad(runtime.store, runtime.executor.activeCount()),
     maxWorkers: settings.executor.maxWorkers },
-    masterId: runtime.masterId, paused: settings.paused, health: runtime.health }
+    masterId: runtime.masterId, paused: settings.paused, safety: runtime.safety.status(), health: runtime.health }
 }
 const views = (runtime: HttpHost): ViewHost => ({ store: runtime.store, sources: runtime.sources, links: runtime.links() })
 const setupState = (runtime: HttpHost): SetupState => ({ deployment: runtime.configured() ? runtime.deployment : undefined,
@@ -190,9 +198,18 @@ function routes(runtime: HttpHost): Routes {
       return ticketList(views(runtime), state, offset, limit)
     },
     'GET tickets/:id': ({ params }) => ticketPage(runtime, params.id),
-    'POST tickets/:id/retry': ({ params }) => { const id = ticket(params.id); runtime.engine.retryTicket(id); return { retried: true } },
+    'POST tickets/:id/retry': ({ params }) => { const id = ticket(params.id); runtime.safety.assertRunning(); runtime.engine.retryTicket(id); return { retried: true } },
     'POST tickets/:id/stop': ({ params }) => { const id = ticket(params.id); runtime.engine.stopTicket(id); return { stopped: true } },
     'POST executor/pause': async ({ body }) => runtime.settings.pause(z.object({ paused: z.boolean() }).parse(await body()).paused, 'panel'),
+    'POST safety/halt': async ({ body }) => {
+      const { reason } = z.object({ reason: z.string().trim().min(1).max(1000) }).strict().parse(await body())
+      return runtime.emergencyStop(reason)
+    },
+    'POST safety/resume': async ({ body }) => {
+      const { generation } = z.object({ generation: z.number().int().nonnegative().max(Number.MAX_SAFE_INTEGER) }).strict().parse(await body())
+      const resumed = await runtime.resumeSafety(generation)
+      return { resumed, safety: runtime.safety.status() }
+    },
     'PUT settings/:block': async ({ params, body }) => {
       const block = SettingsBlockSchema.parse(params.block)
       const known = !block.startsWith('source:') || runtime.sources.instances().some(instance => `source:${instance.id}` === block)

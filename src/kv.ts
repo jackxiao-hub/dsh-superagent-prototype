@@ -4,6 +4,7 @@
  */
 import type { PromptVersion } from './app/prompts.ts'
 import type { SettingsVersion } from './app/store.ts'
+import type { SafetyStatus, WorkerStepLedger } from './app/safety.ts'
 import type { SettingsSave } from './policy.ts'
 import type { Retry } from './sources/github.ts'
 
@@ -31,6 +32,11 @@ export const KV = {
     builtIn: family<string, [base: string]>('prompt-built-in:') },
   /** Runtime: the main Session's ID. */
   runtime: { masterId: record<string>('master-id') },
+  /** Safety: durable halt generation, bounded per-ticket scheduling ledgers, UTC admission totals and ticket deduplication. */
+  safety: { halt: record<SafetyStatus>('safety-halt'),
+    worker: family<WorkerStepLedger, [ticketHash: string]>('safety-worker:'),
+    inferredDay: family<number, [utcDay: string]>('safety-inferred-day:'),
+    inferredTicket: family<{ day: string }, [ticketHash: string]>('safety-inferred-ticket:') },
   /** Sessions: prompt revisions each Session has worked under, ordered oldest first; the last entry (`.at(-1)`) is its active revision. */
   sessions: { prompts: family<number[], [session: string]>('session-prompts:') },
   /** Schema 11 migration: legacy main-Session queues imported into the effect table. */

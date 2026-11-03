@@ -5,11 +5,33 @@ import { LIMITS } from '../limits.ts'
 import { usePoll, type SettingsView, type SourceView, type StateView } from './api.ts'
 import { DisclosureRow, Icon, InfoTip, Input, Pill } from './controls.tsx'
 import { SaveBar } from './draft.tsx'
-import { usePanel } from './provider.tsx'
+import { usePanel, usePanelData } from './provider.tsx'
 import { TicketLine } from './rows.tsx'
 import { ConfigHistory, Field, Fields, ModelField, numberOf, useBlockDraft, useSettings } from './settings-kit.tsx'
 import { localized } from './text.ts'
 import { ConfirmButton, Hint, LabelValue, LoadMore, LoadState, Section, StatusHead } from './widgets.tsx'
+
+/** Global operator control, available from every panel tab; it never confuses a dispatch pause with confirmed cleanup. */
+export function SafetyControl() {
+  const { t, call } = usePanel()
+  const { state, reload } = usePanelData()
+  if (!state) return null
+  const safety = state.safety
+  const halt = async () => { await call('POST safety/halt', { body: { reason: t('safetyOperatorReason') } }); await reload() }
+  if (!safety.active) return <ConfirmButton variant="outline" icon="stop" label={t('safetyHalt')}
+    title={t('safetyHalt')} message={t('safetyHaltConfirm')} onConfirm={halt} />
+  const ready = safety.phase === 'halted' && safety.errors.length === 0
+  const resume = async () => { await call('POST safety/resume', { body: { generation: safety.generation } }); await reload() }
+  return <>
+    <span className="dt-status-text" data-state="warning" role="status" title={[safety.reason, ...safety.errors].join('\n')}>
+      {t(ready ? 'safetyHeld' : safety.phase === 'stopping' ? 'safetyStopping' : 'safetyCleanupFailed')}
+    </span>
+    {ready ? <ConfirmButton key={`resume:${safety.generation}`} variant="outline" icon="play" label={t('safetyResume')}
+      title={t('safetyResume')} message={t('safetyResumeConfirm', { generation: safety.generation })} onConfirm={resume} />
+      : <ConfirmButton key={`cleanup:${safety.generation}`} variant="outline" icon="stop" label={t('safetyRetryCleanup')}
+        title={t('safetyRetryCleanup')} message={t('safetyRetryConfirm')} onConfirm={halt} />}
+  </>
+}
 
 export function ExecutionStatus({ filter: current, state, reload }: {
   filter: TicketFilter; state: StateView; reload: () => Promise<void>
@@ -20,7 +42,7 @@ export function ExecutionStatus({ filter: current, state, reload }: {
   const { paused, load: { maxWorkers } } = state
   // Pausing uses its own block revision so toggling pause does not invalidate an open Execution settings draft.
   const pause = async () => { await call('POST executor/pause', { body: { paused: !paused } }); await reload() }
-  const status = state.setup.problem ? { tone: 'warning', label: t('executorWaitingSetup') } : paused ? { tone: 'warning',
+  const status = state.safety.active ? { tone: 'warning', label: t('safetyHeld') } : state.setup.problem ? { tone: 'warning', label: t('executorWaitingSetup') } : paused ? { tone: 'warning',
     label: t('processingPaused') }
     : { tone: 'ongoing', label: t('executorRunning') }
   const action = paused ? 'resumeProcessing' : 'pauseProcessing'
@@ -32,10 +54,13 @@ export function ExecutionStatus({ filter: current, state, reload }: {
         <LabelValue label={t('executingLabel')}
           value={`${state.load.running} / ${maxWorkers}`} /><LabelValue label={t('queuedLabel')} value={state.load.queued} />
       </>}
-      <ConfirmButton variant="outline" icon={paused ? 'play' : 'pause'} label={t(action)} title={t(action)} message={t(paused
+      {!state.safety.active && <ConfirmButton variant="outline" icon={paused ? 'play' : 'pause'} label={t(action)} title={t(action)} message={t(paused
         ? 'resumeProcessingConfirm' : 'pauseProcessingConfirm')}
-        onConfirm={pause} />
+        onConfirm={pause} />}
     </div>
+    <Hint>{t('safetyBudgetSummary', { steps: state.setup.machine.maxWorkerSteps, turns: state.setup.machine.maxWorkerTurns,
+      daily: state.setup.machine.inferredAdmissionsPerDay })}</Hint>
+    {state.setup.machine.allowWorkerSubagents && <Hint>{t('safetyNestedWarning')}</Hint>}
     <div className="dt-filters">
       {TICKET_FILTERS.map(value => <Pill key={value} active={current === value}
         onClick={() => { setLimit(20); navigate({ page: 'execution', query: value === 'open' ? {} : { filter: value } },

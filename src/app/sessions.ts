@@ -19,6 +19,11 @@ import { SKILL_PREFIX, type PromptVersion, type Prompts } from './prompts.ts'
 import type { Store } from './store.ts'
 import { KV } from '../kv.ts'
 import type { RegisterTool, Tool } from './tools/tool.ts'
+import type { Machine } from '../deployment.ts'
+import type { Safety } from './safety.ts'
+import { Later } from './effects.ts'
+import { sameDirectory } from '../infra/environment.ts'
+import { runningJobs, stopBackground, until } from '../executor/background.ts'
 
 /** Host dependencies used by `Sessions`. */
 export interface SessionsHost {
@@ -31,6 +36,10 @@ export interface SessionsHost {
   readonly health: HealthEntry
   readonly masterId: string
   readonly lifetime: AbortSignal
+  readonly machine: Pick<Machine, 'executionPermission' | 'allowWorkerSubagents'>
+  readonly safety: Pick<Safety, 'halted' | 'admitStep'>
+  paused(): boolean
+  budgetExceeded(ticketId: string, reason: 'step-limit' | 'turn-limit'): void
   closing(): boolean
   /** Execution environment variables for `ticket`, rendered into its worker's system prompt. */
   environment(ticket: Ticket): Variable[]
@@ -42,7 +51,7 @@ export interface SessionsHost {
  * What Sessions registered for an agent it decorated: the releases of its prompt section, tools and skill scope, the scope
  * its skills are registered in, and the skills of one prompt revision; for a worker's subagent, only its tool limits.
  */
-interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: { revision: number; dispose: () => void }; subagent?: true }
+interface SessionBinding { disposers: (() => void)[]; scope?: Context; skills?: { revision: number; dispose: () => void }; subagent?: true; ticketId?: string; ready?: boolean; blocked?: boolean }
 
 /** The agent presets Executor Sessions and the main Session are created with, which the bundle's patch defines. */
 export const WORKER_PRESET = 'dsh-superagent-worker', ROUTER_PRESET = 'dsh-superagent-router'
@@ -101,8 +110,10 @@ export class Sessions {
     this.ctx = host.context
     this.agentDelivery = new AgentDelivery(host.context)
     // Deliver relays and notices to the main Session in the order they were queued.
-    host.effects.handle('relay', ({ text }, requestId) => this.prompt(host.masterId, requestId, text, 'steer'), { ordered: true })
-    host.effects.handle('notice', ({ value, summary }, name) => this.inject(name, value, summary), { ordered: true })
+    host.effects.handle('relay', ({ text }, requestId) => this.prompt(host.masterId, requestId, text, 'steer'),
+      { ordered: true, limit: () => host.paused() ? 0 : 1 })
+    host.effects.handle('notice', ({ value, summary }, name) => this.inject(name, value, summary),
+      { ordered: true, limit: () => host.safety.halted() || host.closing() ? 0 : 1 })
   }
   /** Subscribes to host agent and session events so newly created sessions are decorated and model-budget retries are reflected in health. Call once at startup. */
   install(): void {
@@ -119,6 +130,32 @@ export class Sessions {
       this.updateModelHealth()
     })
     ctx.on('agent/created', async ({ agent }) => { await this.decorate(agent); return undefined })
+    ctx.on('agent/pre-step', async ({ agent, turn, step }, next) => {
+      const binding = this.bindings.get(agent)
+      if (!binding) return next()
+      if (this.host.closing() || this.host.safety.halted() || !binding.ready) return { kind: 'reject' }
+      const decision = await next()
+      if (decision.kind !== 'enter') return decision
+      // Recheck after the downstream waterfall: a halt can commit while another listener awaits.
+      if (this.host.closing() || this.host.safety.halted()) return { kind: 'reject' }
+      const ticket = binding.ticketId ? this.host.store.tickets.get(binding.ticketId) : this.ticketOf(agent)
+      if (binding.ticketId && !ticket || ticket && !liveTicket(ticket)) return { kind: 'reject' }
+      if (ticket && !binding.subagent) {
+        const createdAt = agent.session.header.createdAt
+        if (!Number.isFinite(createdAt)) throw new Error('Worker Session has no durable creation identity')
+        const admission = this.host.safety.admitStep(ticket.id, { sessionId: key(agent.id, String(createdAt)), turn, step })
+        if (!admission.allowed) {
+          if (admission.reason !== 'halted') {
+            binding.blocked = true
+            this.host.budgetExceeded(ticket.id, admission.reason)
+          }
+          return { kind: 'reject' }
+        }
+        binding.blocked = false
+      }
+      if (binding.subagent && !this.host.machine.allowWorkerSubagents) return { kind: 'reject' }
+      return decision
+    })
     // Opening a Session in DSH's Web UI before its first turn may select the default preset for it: select ours again. After
     // its first turn DSH refuses any selection, which leaves it as it is.
     ctx.inject(['agentPresets'], child => {
@@ -134,7 +171,7 @@ export class Sessions {
       if (status === 'idle' && !this.host.closing()) { this.retryHealth.clear(agent.id); this.updateModelHealth() }
     })
   }
-  /** Resolves or creates session `id` in workspace `cwd`, initializes its role model, decorates it with prompts/skills/tools, sets `danger-full-access` permissions, and renames it to `title`. */
+  /** Resolve/create a managed Session, migrate its directory and apply the operator's sandbox mode with approvals disabled before admitting work. */
   async ensure(id: string, cwd: string, title: string, role: 'orchestrator' | 'worker'): Promise<Agent> {
     const ctx = this.ctx
     let result = await ctx.sessionController.resolveAgent(id as SessionId)
@@ -146,12 +183,32 @@ export class Sessions {
       result = await ctx.sessionController.resolveAgent(id as SessionId)
     }
     if ('error' in result) throw result.error
-    const settings = this.host.store.settings()
-    await initializeRoleModel(ctx, result.agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
-    await this.decorate(result.agent)
-    ctx.permissionPresets.set(result.agent.session, 'danger-full-access')
+    const agent = result.agent, settings = this.host.store.settings()
+    await this.decorate(agent)
+    const binding = this.bindings.get(agent)!
+    const workingDirectory = ctx.get('workingDirectory') as { get(session: Agent['session']): string;
+      set(agent: Agent, path: string, signal?: AbortSignal): Promise<string> } | undefined
+    if (!workingDirectory) throw new Error('Managed Sessions require the working directory service')
+    const changedDirectory = !sameDirectory(workingDirectory.get(agent.session), cwd)
+    if (changedDirectory || !binding.ready && agent.status !== 'idle') {
+      binding.ready = false
+      agent.cancel({ kind: 'hook', reason: 'Managed Session safety initialization' }, { keepInbox: true })
+      const stopped = await until(stopBackground(ctx, agent.id, 'Managed Session workspace migration', true).then(() => true), this.host.lifetime, 10_000)
+      if (!stopped || !await until(agent.whenIdle().then(() => true), this.host.lifetime, 10_000)
+        || runningJobs(ctx, agent.id).length) throw new Error('Session work did not stop before workspace migration')
+    }
+    if (changedDirectory) await workingDirectory.set(agent, cwd, this.host.lifetime)
+    const mode = this.host.machine.executionPermission
+    const preset = ctx.permissionPresets.catalog().options.find(option => ctx.permissionPresets.resolve(option.value).sandbox === mode)
+    if (!preset) throw new Error(`No configured permission preset provides sandbox mode ${mode}`)
+    ctx.permissionPresets.set(agent.session, preset.value)
+    const approval = ctx.get('approval') as { setPolicy(agent: Agent, policy: 'never'): void } | undefined
+    if (!approval) throw new Error('Managed Sessions require the approval policy service')
+    approval.setPolicy(agent, 'never')
+    await initializeRoleModel(ctx, agent, role === 'orchestrator' ? settings.eval.model : settings.executor.model)
     await ctx.sessionController.rename({ sessionId: id as SessionId, title })
-    return result.agent
+    binding.ready = true
+    return agent
   }
   /** Returns whether `sessionId` already holds the message delivered under `requestId`, or `false` if the session does not exist. */
   async holds(sessionId: string, requestId: string): Promise<boolean> {
@@ -163,7 +220,10 @@ export class Sessions {
     accepted?: () => void): Promise<void> {
     const result = await this.ctx.sessionController.resolveAgent(sessionId as SessionId)
     if ('error' in result) throw result.error
-    await this.agentDelivery.send(result.agent, key(requestId), text, mode, this.host.lifetime, authorize, accepted)
+    await this.agentDelivery.send(result.agent, key(requestId), text, mode, this.host.lifetime, () => {
+      if (this.host.closing() || this.host.safety.halted()) throw new Later('Processing is halted')
+      authorize?.()
+    }, accepted)
   }
   /** The id of the message `prompt` delivers under `requestId`, which DSH's inbox events name it by. */
   promptedId(requestId: string): MessageId { return messageId(key(requestId)) }
@@ -182,7 +242,9 @@ export class Sessions {
     if ('error' in resolved) return
     // Deduplicate by notice name and payload hash so retries are idempotent while updated payloads still deliver.
     const text = JSON.stringify(value)
-    await this.agentDelivery.send(resolved.agent, `notice:${name}:${key(text)}`, text, { inject: summary }, this.host.lifetime)
+    await this.agentDelivery.send(resolved.agent, `notice:${name}:${key(text)}`, text, { inject: summary }, this.host.lifetime, () => {
+      if (this.host.closing() || this.host.safety.halted()) throw new Later('Processing is halted')
+    })
   }
   /** Returns the current prompt revision, the active prompt revision of each loaded Session, and whether the main Session still has a pending `'prompts'` notice. */
   status() {
@@ -211,7 +273,15 @@ export class Sessions {
           const image = value && typeof value === 'object' && 'image' in value ? (value as { image: never }).image : undefined
           return image ? [text, { type: 'image' as const, attachment: image }] : [text]
         } },
-        execute: (args, execution) => execute(schema.parse(args), execution.signal) }))
+        execute: (args, execution) => {
+          if (this.host.closing() || this.host.safety.halted()) throw new Later('Processing is halted')
+          if (!binding.ready || binding.blocked) throw new Error('Session safety initialization or scheduling budget blocks tools')
+          if (binding.ticketId) {
+            const ticket = this.host.store.tickets.get(binding.ticketId)
+            if (!ticket || !liveTicket(ticket)) throw new Error('Ticket ended; new work needs a new authorized ticket')
+          }
+          return execute(schema.parse(args), execution.signal)
+        } }))
     }
   }
   /** Returns `sessionId`'s active model-budget retry state (`{ model_retry }`) for status listings, or `{}` when not waiting on one. */
@@ -235,8 +305,11 @@ export class Sessions {
     const master = agent.id === host.masterId
     const ticket = master ? undefined : this.ticketOf(agent)
     if (!master && !ticket) { this.limitSubagent(agent); return }
-    const binding: SessionBinding = { disposers: [] }
+    const binding: SessionBinding = { disposers: [], ...(ticket ? { ticketId: ticket.id } : {}) }
     this.bindings.set(agent, binding)
+    binding.disposers.push(agent.ctx.tools.guard(() => this.host.closing() || this.host.safety.halted()
+      ? 'Processing is halted; operator recovery is required' : !binding.ready ? 'Session safety initialization is not complete'
+      : binding.blocked ? 'Root Worker scheduling budget is exhausted' : undefined))
     this.retryHealth.restore(agent.id, agent.session.snapshotEvents())
     if (agent.status === 'idle') this.retryHealth.clear(agent.id)
     this.updateModelHealth()
@@ -289,8 +362,13 @@ export class Sessions {
   private workOnly(agent: Agent, ticketId: string): (() => void)[] {
     const store = this.host.store
     const parent = scopeParentOf(agent)
-    const allow = WORK_TOOLS.filter(name => agent.ctx.tools.get(name, parent))
-    return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(() => {
+    const delegation = new Set(['subagent', 'list_subagent_models', 'send_message', 'list_agents', 'interrupt_agent'])
+    const allow = WORK_TOOLS.filter(name => (this.host.machine.allowWorkerSubagents || !delegation.has(name)) && agent.ctx.tools.get(name, parent))
+    return [agent.ctx.tools.restrict({ allow }), agent.ctx.tools.guard(execution => {
+      if (this.host.closing() || this.host.safety.halted()) return 'Processing is halted; operator recovery is required'
+      const binding = this.bindings.get(agent)
+      if (binding?.blocked) return 'Root Worker scheduling budget is exhausted'
+      if (!this.host.machine.allowWorkerSubagents && (binding?.subagent || delegation.has(execution.name))) return 'Worker subagents are disabled; root Worker scheduling budgets do not cover nested agents'
       const current = store.tickets.get(ticketId)
       return !current || !liveTicket(current) ? 'Ticket ended; new work needs a new authorized ticket' : undefined
     })]
@@ -301,14 +379,20 @@ export class Sessions {
    * it is.
    */
   private limitSubagent(agent: Agent): void {
-    let parent = agent.session.header.parentSession
-    // Up the subagents' parents to the worker, which are loaded while their subagents run.
-    for (let depth = 0; parent !== undefined && ticketOfSession(parent) === undefined && depth < 8; depth++) {
-      parent = this.ctx.agents.get(parent)?.session.header.parentSession
+    let parent = agent.session.header.parentSession, ticketId: string | undefined
+    const seen = new Set<string>()
+    while (parent !== undefined && !seen.has(parent)) {
+      seen.add(parent)
+      const live = this.ctx.agents.get(parent)
+      ticketId = ticketOfSession(parent) ?? (live && this.bindings.get(live)?.ticketId)
+      if (ticketId) break
+      parent = live?.session.header.parentSession
     }
-    const ticketId = parent === undefined ? undefined : ticketOfSession(parent)
     if (ticketId === undefined || !this.host.store.tickets.get(ticketId)) return
-    this.bindings.set(agent, { disposers: this.workOnly(agent, ticketId), subagent: true })
+    const binding: SessionBinding = { disposers: [], subagent: true, ticketId, ready: true }
+    this.bindings.set(agent, binding)
+    binding.disposers.push(...this.workOnly(agent, ticketId))
+    if (!this.host.machine.allowWorkerSubagents || this.host.safety.halted()) agent.cancel({ kind: 'hook', reason: 'Worker subagents are disabled or processing is halted' })
   }
   /** Register the skills of a prompt version in the agent's skill scope, in place of an earlier version's. */
   private bindSkills(binding: SessionBinding, version: PromptVersion): void {

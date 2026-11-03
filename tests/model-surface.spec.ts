@@ -23,6 +23,7 @@ import { SettingsSchema } from '../src/policy.ts'
 import { feishuKind, feishuTrigger } from '../src/sources/feishu.ts'
 import { githubKind } from '../src/sources/github.ts'
 import { testMachine } from './fixtures/deployment.ts'
+import { safetyServices } from './fixtures/host.ts'
 
 type Role = 'orchestrator' | 'worker'
 interface Surface { where: string; owner: string; role: Role | 'both'; text: string }
@@ -100,7 +101,7 @@ async function start() {
   const sections = new Map<string, Section>()
   const skills = new Map<string, Skill[]>()
   const inputs: { sessionId: string; text: string }[] = []
-  const create = async ({ sessionId }: { sessionId: string }) => {
+  const create = async ({ sessionId, workspaceId }: { sessionId: string; workspaceId: string }) => {
     if (agents.has(sessionId)) return
     const agentCtx = new Context()
     const own = new Map<string, Tool>(), registered: Skill[] = []
@@ -123,7 +124,7 @@ async function start() {
     const deliver = (queue: UserMessage[]) => (message: UserMessage) => {
       queue.push(message); record(message); agents.get(sessionId)!.status = 'running'
     }
-    const session = { id: sessionId, snapshotEvents: () => [], requestHeader: () => undefined, append: () => {} }
+    const session = { id: sessionId, header: { cwd: workspaceId, createdAt: Date.now() }, snapshotEvents: () => [], requestHeader: () => undefined, append: () => {} }
     agents.set(sessionId, { id: sessionId, ctx: agentCtx, inbox, followup: deliver(inbox.nextTurn), steer: deliver(inbox.nextStep),
       inject: record, status: 'idle', cancel: () => {}, whenIdle: async () => {}, session } as never)
   }
@@ -133,7 +134,7 @@ async function start() {
   const services = { agents, llm: { resolveCallConfig: async (value: unknown) => value },
     workspaceRegistry: { create: async (cwd: string) => ({ id: cwd }) },
     sessionController: { create, resolveAgent, selectModel: async () => {}, rename: async () => {}, inspect: async () => ({ events: [] }) },
-    sessionPersistence: { flush: async () => {}, open: async () => history }, permissionPresets: { set: () => {} }, subprocess,
+    sessionPersistence: { flush: async () => {}, open: async () => history }, ...safetyServices(), subprocess,
     webServer: { host: '127.0.0.1', port: 3082, register: () => () => {} } }
   for (const [name, service] of Object.entries(services)) ctx.reflect.provide(name, service)
   const seed = new Store(join(directory, 'orchestrator.sqlite'))

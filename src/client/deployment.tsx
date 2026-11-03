@@ -17,7 +17,8 @@ import { CheckSetupButton, Hint, KeyValues, Section, SetupMessage } from './widg
 export type DeploymentForm = ConfigPageForm | undefined
 type Op = Parameters<ConfigPageForm['mutate']>[0][number]
 
-const MACHINE_LIMITS = ['promptMaxChars', 'admissionContextMaxPages', 'admissionContextTimeoutMs'] as const
+const MACHINE_LIMITS = ['promptMaxChars', 'admissionContextMaxPages', 'admissionContextTimeoutMs', 'maxWorkerSteps', 'maxWorkerTurns',
+  'inferredAdmissionsPerDay'] as const
 type Limits = Record<typeof MACHINE_LIMITS[number], string>
 const text = (value: unknown): string => typeof value === 'string' || typeof value === 'number' ? String(value) : ''
 const limitsOf = (values: object | undefined): Limits =>
@@ -72,11 +73,18 @@ export function DeploymentPage({ setup, form, accounts: showAccounts }: { setup:
           <span className="dt-field-head">{t('deploymentStateDir')}<InfoTip text={t('deploymentStateDirHint')} /></span>
           <span className="dt-mono">{setup.machine.stateDir}</span>
         </div>
+        <KeyValues rows={[[t('safetyPermission'), setup.machine.executionPermission],
+          [t('safetySubagents'), t(setup.machine.allowWorkerSubagents ? 'yes' : 'no')]]} />
+        <Hint>{t('safetyPermissionHint')}</Hint>
       </Section>
       <Section title={t('deploymentLimits')} hint={t('deploymentLimitsHint')}>
         {limit('promptMaxChars', t('deploymentPromptMaxChars'))}
         {limit('admissionContextMaxPages', t('deploymentContextPages'))}
         {limit('admissionContextTimeoutMs', t('deploymentContextTimeout'))}
+        {limit('maxWorkerSteps', t('safetyMaxSteps'))}
+        {limit('maxWorkerTurns', t('safetyMaxTurns'))}
+        {limit('inferredAdmissionsPerDay', t('safetyDailyAdmissions'))}
+        <Hint>{t('safetyBudgetHint')}</Hint>
       </Section>
     </Fields>
     {editable && <SaveBar {...draft} onDiscard={draft.discard} />}

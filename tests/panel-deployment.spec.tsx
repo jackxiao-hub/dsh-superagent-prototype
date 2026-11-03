@@ -49,6 +49,26 @@ it('keeps a refused Deployment change as a draft, and shows the settings read-on
   expect(all('button').some(button => button.textContent === '保存')).toBe(false)
 })
 
+it('edits durable scheduling limits without offering permission escalation controls', async () => {
+  const { form, mutations } = fakeForm()
+  server.form = form
+  at({ page: 'settings', query: { group: 'deployment' } })
+  await mount()
+  expect(text()).toContain('workspace-write')
+  expect(field<HTMLInputElement>(zh.safetyMaxSteps).value).toBe('120')
+  expect(field<HTMLInputElement>(zh.safetyMaxTurns).value).toBe('12')
+  expect(field<HTMLInputElement>(zh.safetyDailyAdmissions).value).toBe('0')
+  expect(document.querySelector('select[name="executionPermission"]')).toBeNull()
+  await type(field<HTMLInputElement>(zh.safetyMaxSteps), '80')
+  await type(field<HTMLInputElement>(zh.safetyDailyAdmissions), '2')
+  await click(zh.save)
+  expect(mutations).toEqual([{ revision: 1, ops: [
+    { op: 'set', path: ['maxWorkerSteps'], value: 80 },
+    { op: 'set', path: ['inferredAdmissionsPerDay'], value: 2 },
+  ] }])
+  expect(text()).toContain(zh.safetyBudgetHint)
+})
+
 it('merges a Deployment draft into the values another page saved meanwhile, and writes only what it changed', async () => {
   const { form: shared, mutations } = fakeForm()
   server.form = shared
