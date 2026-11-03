@@ -9,7 +9,7 @@
 | P0 | 完成；后续跨平台修复后远端三环境 CI 全通过 | DSH 0.2.1-rc.5、Cordis 4.0.5、Schemastery 3.18.5；锁文件；Linux/Windows CI | 无 peer 冲突，类型检查和构建通过；平台专用测试明确区分 |
 | P1 | 完成离线领域闭环与本机验证 | 无账号、模型和网络的确定性离线回放；真实 Engine / Policy / SQLite / Effects / Outbox | 请求到模拟 PR/交付、订阅直通、去重、观察模式、停止与恢复全部有断言 |
 | P2 | 完成本机完整验证 | 安全默认、独立 Router 工作目录、持久急停、调度预算、主动接单配额 | Host 端强制；跨重启不清零；急停先持久化再取消；人工恢复有 CAS |
-| P3 | 待实现 | 主动观察统计、只读运维检查与部署验收说明 | 不自动扩大授权、不擅自恢复人工停止、故障原因可追溯 |
+| P3 | 完成工具和专项验证；真实环境验收待执行 | 主动观察统计、只读运维检查与部署验收说明 | 不自动扩大授权、不擅自恢复人工停止、故障原因可追溯 |
 
 每一阶段单独提交。后续阶段可能在工作区并行开发，但只有经过审阅和相应验证的文件进入该阶段提交。
 
@@ -56,9 +56,23 @@ P1 集成本机 `pnpm check`：**1179 通过、29 个明确 POSIX 用例跳过**
 - 面板跨 tab 提供急停、清理重试与人工 CAS 解除；旧 generation 的确认不能解除新一代 halt。预算可通过 DSH ConfigForm 修改，权限提升不在此表单提供。
 - 保留的边界：只限制 root 调度，不是 token/费用预算；loopback API 不是强认证；Host subprocess、外部已提交写入、分支保护和真实 sandbox 需部署层解决。
 
-P2 本机完整 `pnpm check`：**1215 通过、29 个 POSIX 用例跳过**；peer 检查、类型检查与构建通过。新增 Safety 12 项、Runtime safety 16 项，另有 HTTP / UI 的急停、CAS 冲突和预算配置回归；这些并非真实模型或 OS sandbox 验收。
+P2 本机完整 `pnpm check`：**1215 通过、29 个 POSIX 用例跳过**；peer 检查、类型检查与构建通过。新增 Safety 12 项、Runtime safety 16 项，另有 HTTP / UI 的急停、CAS 冲突和预算配置回归；这些并非真实模型或 OS sandbox 验收。P2 提交的远端 Linux 双版本与 Windows 三环境也已[全部通过](https://github.com/jackxiao-hub/dsh-superagent-prototype/actions/runs/41664638439)。
 
 P0/P1 的远端三环境 CI 在 stream-health 修复提交后已全通过：[Actions](https://github.com/jackxiao-hub/dsh-superagent-prototype/actions/runs/41485880598)。该修复保留同一 Feishu 连接上的 JSON 错误，避免 stdout/stderr 的 ready 行顺序掩盖错误；没有放宽 Linux 断言。
+
+## P3：受控观察与只读运维
+
+已集成 `pnpm doctor --state-dir <existing-backup-directory>`，构建入口为 `lib/doctor.js`；专项测试 14 项。详见 [运维说明与隔离验收清单](OPERATIONS.md)。
+
+- 只读 SQLite connection，检查 integrity / schema；不构造生产 Runtime / Store / Safety，不创建目录、迁移、checkpoint 或修复。WAL 缺 sidecar 时保守阻断；优先使用人工准备的一致性独立备份。
+- 输出固定、有界、脱敏的聚合 JSON：halt/pause、Ticket / receipt、effect backlog / age / failure、UTC 24h explicit / inferred / would_accept 计数；不回显账号、原文、ID、路径和异常内容。
+- exit 0 仅表示这些持久字段检查通过；exit 2 保持人工停止或需调查状态；exit 1 为输入/IO/损坏等失败。任何结果都不自动 resume、启动服务或切换 auto。
+- 验收清单覆盖独立 Linux profile、最小凭据、真实模型 → PR → 人工合并、observe 人工抽样、备份与 generation-CAS 恢复；仍全部标记待实际执行。
+- CI 增加 peer 检查与构建后 doctor 入口 smoke test，离线 replay 继续执行。
+
+P3 集成本机验证：frozen lockfile 安装（禁 lifecycle scripts）、peer 检查、`pnpm check` 均通过；**1229 项通过、29 个 POSIX 用例跳过**。构建后的默认 replay 33 步 / 14 检查通过，doctor `--help` 入口正常。未知 schema、损坏、halt/pause、WAL、脱敏和不写状态均有专项断言。
+
+P3 完成的是统计、诊断工具与可执行验收标准，不是已运行数周的主动 Agent、不证明语义准确率，也不是跨设备 daemon 或自主修改自身代码的 Watchdog。
 
 ## 支持边界
 

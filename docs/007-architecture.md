@@ -316,6 +316,8 @@ Some generic modules still refer directly to GitHub or Feishu:
 | `src/replay/index.ts` | Offline adapter using the production Engine, Policy, SQLite Store, Effects and Outbox with scripted external ports |
 | `src/replay/scenario.ts` | Strict bounded replay schema and the embedded acceptance, authorization, stop and recovery scenario |
 | `src/replay/cli.ts` | Bounded JSON fixture input, machine-readable summary and nonzero failure exit codes |
+| `src/diagnostics/index.ts` | Read-only SQLite integrity/schema checks and redacted aggregate-only halt, queue and observation statistics; no Runtime or auto-healing |
+| `src/diagnostics/cli.ts` | Explicit state-directory input, bounded diagnostic report and healthy/held/failure exit contract |
 | `src/app/runtime.ts` | The Runtime, the composition root, with its start and stop |
 | `src/app/setup.ts` | Setup, and `setupChanged`, whether a save changes a field setup reads |
 | `src/app/passes.ts` | Passes, the pass scheduler |
@@ -408,6 +410,7 @@ Some generic modules still refer directly to GitHub or Feishu:
 | Test | Covers |
 | --- | --- |
 | `tests/replay.spec.ts` | Deterministic offline domain loop, SQLite restart reconciliation, strict fixture boundaries and CLI failure contracts |
+| `tests/diagnostics.spec.ts` | Read-only production SQLite snapshots/live WAL, missing-sidecar refusal, aggregate time boundaries, redaction and held/nonzero CLI contracts |
 | `tests/core-engine.spec.ts` | Domain rules on in-memory repositories: receiving, Eval, fan-out, resume and stop, interrupted Assignments, the pause, Policy changes, reports and outcomes, attaching, replies, failed deliveries and dismissed problems |
 | `tests/stage.spec.ts` | The Ticket stages, row by row |
 | `tests/policy.spec.ts` | Source scope, the gate, the admission table, Mandate revalidation, the Policy version, settings migrations and assessment outcomes |

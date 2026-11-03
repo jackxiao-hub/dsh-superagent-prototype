@@ -50,6 +50,8 @@
     "test": "vitest run",
     "replay": "node lib/replay.js",
     "test:replay": "vitest run tests/replay.spec.ts",
+    "doctor": "node lib/doctor.js",
+    "test:diagnostics": "vitest run tests/diagnostics.spec.ts",
     "check": "pnpm typecheck && pnpm test && pnpm build"
   },
   "engines": {

@@ -36,6 +36,8 @@ Read the numbered documents in order; each builds only on the ones before it.
 - [009 Replay](docs/009-replay.md): offline, deterministic domain acceptance
 - [010 Safety](docs/010-safety.md): defaults, durable root budgets, operator halt and limits
 
+Additional fork guide: [read-only diagnostics and isolated acceptance](docs/OPERATIONS.md). It is a pending real-environment checklist, not a deployment certificate.
+
 ## Development
 
 `pnpm check` runs the typecheck, the tests and the build.
@@ -49,6 +51,15 @@ pnpm replay --fixture examples/replay-typo-pr.json
 ```
 
 The [offline replay guide](docs/009-replay.md) distinguishes real Engine/SQLite/Outbox behavior from scripted Assessment, Executor, Channel and PR adapters. A successful replay does not certify real coding quality or external delivery.
+
+To inspect an existing, separately prepared consistent SQLite backup without running the agent:
+
+```sh
+pnpm doctor --help
+pnpm doctor --state-dir /srv/superagent-backups/verified-snapshot
+```
+
+The report is aggregate-only: halt/pause, pending effects, delivery receipts and 24-hour observation counts. Exit 2 means held/blocked, not permission to resume. It never creates state, repairs, migrates, calls a model or automatically restarts stopped work. See the [operations guide](docs/OPERATIONS.md) for WAL limitations and the real-environment acceptance checklist.
 
 ## License
 
